@@ -1,0 +1,17 @@
+[general]
+name=Corridor Video Maker
+qgisMinimumVersion=3.20
+description=Generate corridor mapping fly-through videos along a centerline. The map pans and rotates automatically so the line always points straight up (forward) in the video.
+version=1.0.0
+author=Sumit Jangir
+email=sumitjangir8796@gmail.com
+about=This plugin generates an MP4 video by animating the QGIS map canvas along a centerline (polyline). At each frame the view centres on the current position and rotates so the travel direction always faces straight up. The user clicks on the map to select which endpoint to start from, and can configure travel speed, frame rate, corridor buffer width, and output resolution.
+tracker=https://github.com/sumitjangir8796/QGIS_plugin_VIDEO_MAKER/issues
+repository=https://github.com/sumitjangir8796/QGIS_plugin_VIDEO_MAKER
+hasProcessingProvider=no
+tags=video,animation,corridor,centerline,mapping,fly-through,pan,rotate
+homepage=https://github.com/sumitjangir8796/QGIS_plugin_VIDEO_MAKER
+category=Vector
+icon=icon.png
+experimental=False
+deprecated=False
