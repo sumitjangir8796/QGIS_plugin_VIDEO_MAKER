@@ -487,18 +487,6 @@ class CorridorVideoMakerDialog(QDialog):
         email_lbl.setOpenExternalLinks(True)
         g_author.addWidget(email_lbl, 1, 1)
 
-        g_author.addWidget(QLabel("<b>GitHub:</b>"), 2, 0)
-        gh_lbl = QLabel('<a href="https://github.com/sumitjangir8796">github.com/sumitjangir8796</a>')
-        gh_lbl.setTextFormat(Qt.RichText)
-        gh_lbl.setOpenExternalLinks(True)
-        g_author.addWidget(gh_lbl, 2, 1)
-
-        g_author.addWidget(QLabel("<b>Plugin repo:</b>"), 3, 0)
-        repo_lbl = QLabel('<a href="https://github.com/sumitjangir8796/QGIS_plugin_VIDEO_MAKER">QGIS_plugin_VIDEO_MAKER</a>')
-        repo_lbl.setTextFormat(Qt.RichText)
-        repo_lbl.setOpenExternalLinks(True)
-        g_author.addWidget(repo_lbl, 3, 1)
-
         layout.addWidget(grp_author)
 
         # ── Quick-use guide ────────────────────────────────────────────
