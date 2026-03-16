@@ -15,6 +15,7 @@ get_line_endpoints()
 """
 
 import math
+import numpy as np
 from qgis.core import (
     QgsGeometry,
     QgsPointXY,
@@ -43,18 +44,20 @@ def get_line_endpoints(geom: QgsGeometry):
 def interpolate_corridor_points(geom: QgsGeometry,
                                 step_m: float,
                                 reverse: bool = False,
-                                layer_crs=None):
+                                layer_crs=None,
+                                smooth_window: int = 40):
     """
     Interpolate evenly-spaced sample points along *geom* (a line geometry).
 
     Parameters
     ----------
-    geom      : QgsGeometry  – the centerline (any CRS)
-    step_m    : float        – distance between samples **in map units**.
-                               If the layer CRS is geographic (degrees) pass a
-                               value in degrees; for projected (metres) pass metres.
-    reverse   : bool         – if True, walk from last vertex to first.
-    layer_crs : QgsCoordinateReferenceSystem or None – used only for info.
+    geom          : QgsGeometry  – the centerline (any CRS)
+    step_m        : float        – distance between samples in map units.
+    reverse       : bool         – if True, walk from last vertex to first.
+    layer_crs     : QgsCoordinateReferenceSystem or None
+    smooth_window : int          – Gaussian smoothing window (frames).
+                                   Larger = smoother turns but more lag.
+                                   0 or 1 = no smoothing.
 
     Returns
     -------
@@ -69,21 +72,28 @@ def interpolate_corridor_points(geom: QgsGeometry,
     if total_length == 0 or step_m <= 0:
         return []
 
-    results = []
+    xs, ys, bearings = [], [], []
     d = 0.0
 
     while d <= total_length:
         pt = geom.interpolate(d).asPoint()
         bearing = _bearing_at_distance(geom, d, step_m, total_length)
-        results.append((pt.x(), pt.y(), bearing))
+        xs.append(pt.x())
+        ys.append(pt.y())
+        bearings.append(bearing)
         d += step_m
 
-    # Always include the exact end point with the last known bearing
+    # Always include the exact end point
     last_pt = geom.interpolate(total_length).asPoint()
-    last_bearing = results[-1][2] if results else 0.0
-    results.append((last_pt.x(), last_pt.y(), last_bearing))
+    xs.append(last_pt.x())
+    ys.append(last_pt.y())
+    bearings.append(bearings[-1] if bearings else 0.0)
 
-    return results
+    # ── Smooth bearings so turns rotate gradually over many frames ────
+    if smooth_window > 1 and len(bearings) > 1:
+        bearings = _smooth_bearings_circular(bearings, smooth_window)
+
+    return list(zip(xs, ys, bearings))
 
 
 def project_step_to_map_units(step_m: float, layer_crs) -> float:
@@ -113,6 +123,51 @@ def project_step_to_map_units(step_m: float, layer_crs) -> float:
 # ---------------------------------------------------------------------------
 # Internal helpers
 # ---------------------------------------------------------------------------
+
+
+def _smooth_bearings_circular(bearings: list, window: int) -> list:
+    """
+    Apply a Gaussian-weighted circular moving average to *bearings*.
+
+    Handles the 0°/360° wrap-around correctly using unit-vector averaging
+    (sum of sin/cos components), so a turn from 350° → 10° smooths through
+    360° rather than jumping back through 180°.
+
+    Parameters
+    ----------
+    bearings : list of float  – raw bearings, degrees clockwise from North
+    window   : int            – total Gaussian window width in samples
+
+    Returns
+    -------
+    list of float – smoothed bearings
+    """
+    n = len(bearings)
+    if n <= 1 or window <= 1:
+        return bearings
+
+    arr = np.array(bearings, dtype=np.float64)
+    half = window // 2
+    sigma = window / 4.0          # 1 sigma = quarter of the window
+
+    # Build normalised Gaussian kernel
+    x = np.arange(-half, half + 1, dtype=np.float64)
+    kernel = np.exp(-0.5 * (x / sigma) ** 2)
+    kernel /= kernel.sum()
+
+    # Convert to unit vectors on the circle
+    rads = np.radians(arr)
+    sin_v = np.sin(rads)          # shape: (n,)
+    cos_v = np.cos(rads)
+
+    # Convolve each component separately (reflect padding avoids edge jumps)
+    sin_smooth = np.convolve(sin_v, kernel, mode='same')
+    cos_smooth = np.convolve(cos_v, kernel, mode='same')
+
+    # Reconstruct angle and normalise to [0, 360)
+    smoothed = np.degrees(np.arctan2(sin_smooth, cos_smooth)) % 360.0
+    return smoothed.tolist()
+
 
 def _bearing_at_distance(geom: QgsGeometry, d: float,
                          step: float, total_length: float) -> float:

@@ -153,6 +153,19 @@ class CorridorVideoMakerDialog(QDialog):
         self.sb_height.setSingleStep(2)
         g.addWidget(self.sb_height, 4, 1)
 
+        g.addWidget(QLabel("Turn smoothing (frames):"), 5, 0)
+        self.sb_smooth = QSpinBox()
+        self.sb_smooth.setRange(0, 500)
+        self.sb_smooth.setValue(40)
+        self.sb_smooth.setSuffix(" frames")
+        self.sb_smooth.setToolTip(
+            "Number of frames over which a turn eases in/out.\n"
+            "0 = instant rotation (hard cuts on turns).\n"
+            "40 = smooth ~1.6 s ease at 25 fps (recommended).\n"
+            "Higher values = more gradual but more lag into a turn."
+        )
+        g.addWidget(self.sb_smooth, 5, 1)
+
         grp_travel.setLayout(g)
         root.addWidget(grp_travel)
 
@@ -295,9 +308,11 @@ class CorridorVideoMakerDialog(QDialog):
         self.lbl_status.setText("Interpolating corridor points …")
         QApplication.processEvents()
 
+        smooth_window = self.sb_smooth.value()
+
         points = interpolate_corridor_points(
             geom, step_map, reverse=self._start_reversed,
-            layer_crs=layer_crs
+            layer_crs=layer_crs, smooth_window=smooth_window
         )
 
         if not points:
