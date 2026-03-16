@@ -2,12 +2,14 @@
 """
 Corridor Video Maker – main plugin class.
 Registers the menu action and toolbar button.
-Auto-installs opencv-python + numpy on first enable.
+Auto-installs opencv-python in a background thread on first enable.
 """
 
 import os
 import sys
 import subprocess
+import tempfile
+import threading
 
 from qgis.PyQt.QtCore import QSettings, QTranslator, QCoreApplication
 from qgis.PyQt.QtGui import QIcon
@@ -18,108 +20,154 @@ from .corridor_video_maker_dialog import CorridorVideoMakerDialog
 
 
 # ---------------------------------------------------------------------------
-# Dependency auto-installer
+# Helper: find the real Python interpreter QGIS is running
 # ---------------------------------------------------------------------------
 
-# numpy is already bundled inside QGIS – only cv2 may be missing.
-REQUIRED_PACKAGES = {
-    "cv2": "opencv-python",
-}
+def _find_python():
+    """
+    Return the path to a working python.exe inside the QGIS installation.
 
+    On some installs sys.executable is qgis.exe / qgis-ltr-bin.exe, not python.
+    We search known locations relative to the QGIS bin folder.
+    """
+    import sys, os
+
+    # 1. sys.executable itself – works on most installs
+    exe = sys.executable
+    base = os.path.basename(exe).lower()
+    if "python" in base:
+        return exe
+
+    # 2. Look for python3.exe / python.exe siblings of qgis*.exe
+    qgis_bin = os.path.dirname(exe)
+    for name in ("python3.exe", "python.exe"):
+        candidate = os.path.join(qgis_bin, name)
+        if os.path.isfile(candidate):
+            return candidate
+
+    # 3. Walk up one level (e.g. C:\Program Files\QGIS 3.x\bin\ -> apps\Python3xx\)
+    qgis_root = os.path.dirname(qgis_bin)
+    import glob
+    patterns = [
+        os.path.join(qgis_root, "apps", "Python3*", "python.exe"),
+        os.path.join(qgis_root, "apps", "Python3*", "python3.exe"),
+    ]
+    for pat in patterns:
+        hits = sorted(glob.glob(pat), reverse=True)   # newest Python first
+        if hits:
+            return hits[0]
+
+    # 4. Fall back – will likely fail, but at least gives an informative error
+    return exe
+
+
+# ---------------------------------------------------------------------------
+# Dependency auto-installer  (runs in a background thread – never blocks QGIS)
+# ---------------------------------------------------------------------------
 
 def _ensure_dependencies(iface):
     """
-    Check for cv2; install it if missing using the same Python that QGIS runs.
-    Uses --user so no admin rights are needed.
-    numpy is intentionally NOT installed here – QGIS ships its own numpy.
+    Check for cv2; if missing, install it in a background thread so QGIS
+    never freezes or times out.  numpy is intentionally skipped – QGIS
+    ships its own.
     """
-    missing = []
-    for module, pip_name in REQUIRED_PACKAGES.items():
-        try:
-            __import__(module)
-        except ImportError:
-            missing.append(pip_name)
+    try:
+        import cv2  # noqa: F401
+        return  # already installed, nothing to do
+    except ImportError:
+        pass
 
-    if not missing:
-        return True
+    # Show a non-blocking info bar immediately
+    try:
+        iface.messageBar().pushMessage(
+            "Corridor Video Maker",
+            "Installing opencv-python in the background … "
+            "The plugin will be ready shortly.",
+            level=Qgis.Info,
+            duration=0,
+        )
+    except Exception:
+        pass
 
-    if iface:
+    def _install():
+        python_exe = _find_python()
+        tmp_dir    = tempfile.gettempdir()
         try:
-            from qgis.core import Qgis
+            result = subprocess.run(
+                [
+                    python_exe, "-m", "pip", "install",
+                    "--user",
+                    "--cache-dir", tmp_dir,
+                    "--no-warn-script-location",
+                    "opencv-python",
+                ],
+                capture_output=True,
+                text=True,
+                cwd=tmp_dir,
+                # No timeout – let pip finish however long it needs
+            )
+            _on_install_done(iface, result)
+        except Exception as exc:
+            _on_install_error(iface, str(exc))
+
+    t = threading.Thread(target=_install, daemon=True)
+    t.start()
+
+
+def _on_install_done(iface, result):
+    """Called from the background thread when pip finishes."""
+    # Add user site-packages to path so cv2 is importable immediately
+    import site, sys
+    try:
+        usp = site.getusersitepackages()
+        if usp not in sys.path:
+            sys.path.insert(0, usp)
+    except Exception:
+        pass
+
+    try:
+        iface.messageBar().clearWidgets()
+    except Exception:
+        pass
+
+    if result.returncode == 0:
+        try:
             iface.messageBar().pushMessage(
                 "Corridor Video Maker",
-                f"Installing required packages: {', '.join(missing)} – please wait …",
-                level=Qgis.Info,
+                "opencv-python installed successfully.  Open the plugin to generate a video.",
+                level=Qgis.Success,
+                duration=8,
+            )
+        except Exception:
+            pass
+    else:
+        err = (result.stderr or result.stdout or "unknown error")[-500:]
+        try:
+            iface.messageBar().pushMessage(
+                "Corridor Video Maker",
+                f"opencv-python install failed.  Run install_deps.bat.  Detail: {err}",
+                level=Qgis.Critical,
                 duration=0,
             )
-            from qgis.PyQt.QtWidgets import QApplication
-            QApplication.processEvents()
         except Exception:
             pass
 
-    import sys
-    import subprocess
-    import tempfile
-    python_exe = sys.executable
-    tmp_dir = tempfile.gettempdir()
+
+def _on_install_error(iface, exc_str):
+    """Called from the background thread on an unexpected exception."""
     try:
-        result = subprocess.run(
-            [python_exe, "-m", "pip", "install", "--user",
-             "--cache-dir", tmp_dir,
-             "--no-warn-script-location"] + missing,
-            capture_output=True,
-            text=True,
-            timeout=300,
-            cwd=tmp_dir,          # keep pip's build artefacts away from Documents
+        iface.messageBar().clearWidgets()
+    except Exception:
+        pass
+    try:
+        iface.messageBar().pushMessage(
+            "Corridor Video Maker",
+            f"Auto-install error: {exc_str}  –  Run install_deps.bat.",
+            level=Qgis.Critical,
+            duration=0,
         )
-        if iface:
-            try:
-                iface.messageBar().clearWidgets()
-            except Exception:
-                pass
-
-        if result.returncode == 0:
-            import site
-            if site.getusersitepackages() not in sys.path:
-                sys.path.insert(0, site.getusersitepackages())
-            if iface:
-                try:
-                    from qgis.core import Qgis
-                    iface.messageBar().pushMessage(
-                        "Corridor Video Maker",
-                        "opencv-python installed. Ready to use!",
-                        level=Qgis.Success,
-                        duration=5,
-                    )
-                except Exception:
-                    pass
-            return True
-        else:
-            from qgis.PyQt.QtWidgets import QMessageBox
-            err = result.stderr[-600:] if result.stderr else "unknown error"
-            QMessageBox.critical(
-                None,
-                "Corridor Video Maker – Install Failed",
-                f"Could not auto-install opencv-python.\n\n"
-                f"Run install_deps.bat from the plugin folder.\n\n{err}",
-            )
-            return False
-
-    except Exception as exc:
-        if iface:
-            try:
-                iface.messageBar().clearWidgets()
-            except Exception:
-                pass
-        try:
-            from qgis.PyQt.QtWidgets import QMessageBox
-            QMessageBox.critical(
-                None, "Corridor Video Maker – Install Error",
-                f"Auto-install failed: {exc}\n\nRun install_deps.bat."
-            )
-        except Exception:
-            pass
-        return False
+    except Exception:
+        pass
 
 
 class CorridorVideoMakerPlugin:
