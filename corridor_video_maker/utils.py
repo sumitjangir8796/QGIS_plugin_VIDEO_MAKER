@@ -15,7 +15,6 @@ get_line_endpoints()
 """
 
 import math
-import numpy as np
 from qgis.core import (
     QgsGeometry,
     QgsPointXY,
@@ -129,14 +128,13 @@ def _smooth_bearings_circular(bearings: list, window: int) -> list:
     """
     Apply a Gaussian-weighted circular moving average to *bearings*.
 
-    Handles the 0°/360° wrap-around correctly using unit-vector averaging
-    (sum of sin/cos components), so a turn from 350° → 10° smooths through
-    360° rather than jumping back through 180°.
+    Handles 0°/360° wrap-around via unit-vector (sin/cos) averaging.
+    Uses numpy if available, otherwise falls back to pure Python.
 
     Parameters
     ----------
-    bearings : list of float  – raw bearings, degrees clockwise from North
-    window   : int            – total Gaussian window width in samples
+    bearings : list of float  – raw bearings in degrees [0, 360)
+    window   : int            – total Gaussian kernel width in samples
 
     Returns
     -------
@@ -146,27 +144,61 @@ def _smooth_bearings_circular(bearings: list, window: int) -> list:
     if n <= 1 or window <= 1:
         return bearings
 
-    arr = np.array(bearings, dtype=np.float64)
-    half = window // 2
-    sigma = window / 4.0          # 1 sigma = quarter of the window
+    try:
+        import numpy as np
+        return _smooth_circular_numpy(bearings, window, np)
+    except ImportError:
+        return _smooth_circular_python(bearings, window)
 
-    # Build normalised Gaussian kernel
-    x = np.arange(-half, half + 1, dtype=np.float64)
+
+def _smooth_circular_numpy(bearings: list, window: int, np) -> list:
+    """Numpy-accelerated circular Gaussian smoother."""
+    arr   = np.array(bearings, dtype=np.float64)
+    half  = window // 2
+    sigma = window / 4.0
+
+    x      = np.arange(-half, half + 1, dtype=np.float64)
     kernel = np.exp(-0.5 * (x / sigma) ** 2)
     kernel /= kernel.sum()
 
-    # Convert to unit vectors on the circle
-    rads = np.radians(arr)
-    sin_v = np.sin(rads)          # shape: (n,)
-    cos_v = np.cos(rads)
-
-    # Convolve each component separately (reflect padding avoids edge jumps)
-    sin_smooth = np.convolve(sin_v, kernel, mode='same')
-    cos_smooth = np.convolve(cos_v, kernel, mode='same')
-
-    # Reconstruct angle and normalise to [0, 360)
-    smoothed = np.degrees(np.arctan2(sin_smooth, cos_smooth)) % 360.0
+    rads      = np.radians(arr)
+    sin_s     = np.convolve(np.sin(rads), kernel, mode='same')
+    cos_s     = np.convolve(np.cos(rads), kernel, mode='same')
+    smoothed  = np.degrees(np.arctan2(sin_s, cos_s)) % 360.0
     return smoothed.tolist()
+
+
+def _smooth_circular_python(bearings: list, window: int) -> list:
+    """
+    Pure-Python circular Gaussian smoother (no numpy).
+    Uses a sliding weighted average of sin/cos components.
+    """
+    import math
+    n     = len(bearings)
+    half  = window // 2
+    sigma = window / 4.0
+
+    # Precompute Gaussian weights
+    weights = [math.exp(-0.5 * (i / sigma) ** 2) for i in range(-half, half + 1)]
+    wsum    = sum(weights)
+    weights = [w / wsum for w in weights]
+
+    rads = [math.radians(b) for b in bearings]
+    result = []
+
+    for i in range(n):
+        s = 0.0
+        c = 0.0
+        for k, w in enumerate(weights):
+            j = i - half + k
+            # Clamp to edges (same as 'nearest' padding)
+            j = max(0, min(n - 1, j))
+            s += w * math.sin(rads[j])
+            c += w * math.cos(rads[j])
+        angle = math.degrees(math.atan2(s, c)) % 360.0
+        result.append(angle)
+
+    return result
 
 
 def _bearing_at_distance(geom: QgsGeometry, d: float,
