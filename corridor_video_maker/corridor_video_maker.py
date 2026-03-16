@@ -59,13 +59,18 @@ def _ensure_dependencies(iface):
 
     import sys
     import subprocess
+    import tempfile
     python_exe = sys.executable
+    tmp_dir = tempfile.gettempdir()
     try:
         result = subprocess.run(
-            [python_exe, "-m", "pip", "install", "--user"] + missing,
+            [python_exe, "-m", "pip", "install", "--user",
+             "--cache-dir", tmp_dir,
+             "--no-warn-script-location"] + missing,
             capture_output=True,
             text=True,
             timeout=300,
+            cwd=tmp_dir,          # keep pip's build artefacts away from Documents
         )
         if iface:
             try:
