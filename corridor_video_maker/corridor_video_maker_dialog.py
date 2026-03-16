@@ -169,8 +169,25 @@ class CorridorVideoMakerDialog(QDialog):
         grp_travel.setLayout(g)
         root.addWidget(grp_travel)
 
+        # ── Distance bar overlay ───────────────────────────────────────
+        grp_bar = QGroupBox("4. Distance Bar Overlay")
+        gb = QGridLayout()
+
+        gb.addWidget(QLabel("Start point name:"), 0, 0)
+        self.le_start_name = QLineEdit()
+        self.le_start_name.setPlaceholderText("e.g.  Village A  (optional)")
+        gb.addWidget(self.le_start_name, 0, 1)
+
+        gb.addWidget(QLabel("End point name:"), 1, 0)
+        self.le_end_name = QLineEdit()
+        self.le_end_name.setPlaceholderText("e.g.  Village B  (optional)")
+        gb.addWidget(self.le_end_name, 1, 1)
+
+        grp_bar.setLayout(gb)
+        root.addWidget(grp_bar)
+
         # ── Output file ────────────────────────────────────────────────
-        grp_out = QGroupBox("4. Output Video File")
+        grp_out = QGroupBox("5. Output Video File")
         lay_out = QHBoxLayout()
 
         self.le_output = QLineEdit()
@@ -300,6 +317,10 @@ class CorridorVideoMakerDialog(QDialog):
         step_map = project_step_to_map_units(step_m_per_frame, layer_crs)
         buffer_map = project_step_to_map_units(buffer_m, layer_crs)
 
+        # Read distance bar labels
+        start_label = self.le_start_name.text().strip()
+        end_label   = self.le_end_name.text().strip()
+
         if step_map <= 0:
             QMessageBox.warning(self, "Error", "Invalid step distance.")
             return
@@ -323,6 +344,7 @@ class CorridorVideoMakerDialog(QDialog):
 
         total_frames = len(points)
         duration_s = total_frames / fps
+        total_distance_m = step_m_per_frame * max(total_frames - 1, 1)
         self.lbl_status.setText(
             f"Rendering {total_frames} frames  "
             f"({duration_s:.1f} s at {fps} fps) …"
@@ -337,6 +359,9 @@ class CorridorVideoMakerDialog(QDialog):
             fps=fps,
             video_width=vid_w,
             video_height=vid_h,
+            total_distance_m=total_distance_m,
+            start_label=start_label,
+            end_label=end_label,
         )
         self._exporter.progressChanged.connect(self._on_progress)
         self._exporter.finished.connect(self._on_finished)
