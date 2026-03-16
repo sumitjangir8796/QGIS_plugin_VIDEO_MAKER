@@ -134,6 +134,11 @@ class CorridorVideoMakerDialog(QDialog):
         self._build_advanced_tab(adv_widget)
         self._tabs.addTab(adv_scroll, "Advanced - Frame Designer")
 
+        # Tab 3: Help & About
+        help_widget = QWidget()
+        self._build_help_tab(help_widget)
+        self._tabs.addTab(help_widget, "Help & About")
+
         # Progress bar (always visible, outside tabs)
         self.progress = QProgressBar()
         self.progress.setRange(0, 100)
@@ -437,6 +442,117 @@ class CorridorVideoMakerDialog(QDialog):
         sd.addWidget(trees_grp, 1)
 
         layout.addWidget(grp_split, 1)
+
+    # ------------------------------------------------------------------
+    # Tab 3: Help & About
+    # ------------------------------------------------------------------
+
+    def _build_help_tab(self, widget):
+        """Build the Help & About tab."""
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(16, 16, 16, 16)
+        layout.setSpacing(14)
+
+        # ── Plugin title ───────────────────────────────────────────────
+        title = QLabel("<h2>Corridor Video Maker</h2>")
+        title.setAlignment(Qt.AlignCenter)
+        title.setTextFormat(Qt.RichText)
+        layout.addWidget(title)
+
+        subtitle = QLabel(
+            "<i>Generate fly-through MP4 videos along any polyline corridor in QGIS.</i>"
+        )
+        subtitle.setAlignment(Qt.AlignCenter)
+        subtitle.setTextFormat(Qt.RichText)
+        subtitle.setWordWrap(True)
+        layout.addWidget(subtitle)
+
+        # Separator
+        sep1 = QFrame()
+        sep1.setFrameShape(QFrame.HLine)
+        sep1.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep1)
+
+        # ── Author ─────────────────────────────────────────────────────
+        grp_author = QGroupBox("Author")
+        g_author = QGridLayout(grp_author)
+        g_author.setSpacing(6)
+
+        g_author.addWidget(QLabel("<b>Name:</b>"), 0, 0)
+        g_author.addWidget(QLabel("Sumit Jangir"), 0, 1)
+
+        g_author.addWidget(QLabel("<b>Email:</b>"), 1, 0)
+        email_lbl = QLabel('<a href="mailto:sumitjangir8796@gmail.com">sumitjangir8796@gmail.com</a>')
+        email_lbl.setTextFormat(Qt.RichText)
+        email_lbl.setOpenExternalLinks(True)
+        g_author.addWidget(email_lbl, 1, 1)
+
+        g_author.addWidget(QLabel("<b>GitHub:</b>"), 2, 0)
+        gh_lbl = QLabel('<a href="https://github.com/sumitjangir8796">github.com/sumitjangir8796</a>')
+        gh_lbl.setTextFormat(Qt.RichText)
+        gh_lbl.setOpenExternalLinks(True)
+        g_author.addWidget(gh_lbl, 2, 1)
+
+        g_author.addWidget(QLabel("<b>Plugin repo:</b>"), 3, 0)
+        repo_lbl = QLabel('<a href="https://github.com/sumitjangir8796/QGIS_plugin_VIDEO_MAKER">QGIS_plugin_VIDEO_MAKER</a>')
+        repo_lbl.setTextFormat(Qt.RichText)
+        repo_lbl.setOpenExternalLinks(True)
+        g_author.addWidget(repo_lbl, 3, 1)
+
+        layout.addWidget(grp_author)
+
+        # ── Quick-use guide ────────────────────────────────────────────
+        grp_how = QGroupBox("Quick Guide")
+        how_lay = QVBoxLayout(grp_how)
+        help_text = QLabel(
+            "<ol>"
+            "<li>Load a <b>line / polyline</b> vector layer into QGIS.</li>"
+            "<li>Open the plugin: <i>Vector &rarr; Corridor Video Maker &rarr; Generate Corridor Video</i>.</li>"
+            "<li>Select the <b>centerline layer</b> from the dropdown.</li>"
+            "<li>Click <b>Pick Start Point from Map</b> and click near the vertex you want to start from.<br>"
+            "&nbsp;&nbsp;&nbsp; Green marker = first vertex &nbsp;|&nbsp; Red marker = last vertex.</li>"
+            "<li>Configure <b>Travel &amp; Display Settings</b> (speed, FPS, buffer, resolution, smoothing).</li>"
+            "<li>Optionally fill in <b>Distance Bar</b> start/end labels.</li>"
+            "<li>For a <b>split-screen</b> view, switch to the <i>Advanced &ndash; Frame Designer</i> tab,<br>"
+            "&nbsp;&nbsp;&nbsp; enable Split View, and choose layers for each panel.</li>"
+            "<li>Choose an output <b>.mp4 file</b> and click <b>Generate Video</b>.</li>"
+            "</ol>"
+        )
+        help_text.setTextFormat(Qt.RichText)
+        help_text.setWordWrap(True)
+        how_lay.addWidget(help_text)
+        layout.addWidget(grp_how)
+
+        # ── Tips ───────────────────────────────────────────────────────
+        grp_tips = QGroupBox("Tips")
+        tips_lay = QVBoxLayout(grp_tips)
+        tips_lbl = QLabel(
+            "<ul>"
+            "<li>Use a <b>projected CRS</b> (e.g. UTM) for accurate metre-based distances.</li>"
+            "<li>Reduce buffer &amp; resolution for a fast preview, then increase for the final render.</li>"
+            "<li>Higher <b>Turn Smoothing</b> values give smoother curves but add a slight directional lag.</li>"
+            "<li>The plugin renders all <b>currently visible</b> map layers &mdash; style your map before generating.</li>"
+            "<li>For very long lines the export can take several minutes; lower FPS or speed for quicker results.</li>"
+            "</ul>"
+        )
+        tips_lbl.setTextFormat(Qt.RichText)
+        tips_lbl.setWordWrap(True)
+        tips_lay.addWidget(tips_lbl)
+        layout.addWidget(grp_tips)
+
+        # ── Version / licence ──────────────────────────────────────────
+        sep2 = QFrame()
+        sep2.setFrameShape(QFrame.HLine)
+        sep2.setFrameShadow(QFrame.Sunken)
+        layout.addWidget(sep2)
+
+        footer = QLabel("Version 1.0.0  &nbsp;|&nbsp;  MIT Licence  &nbsp;|&nbsp;  QGIS 3.20+")
+        footer.setAlignment(Qt.AlignCenter)
+        footer.setTextFormat(Qt.RichText)
+        footer.setStyleSheet("color: grey; font-size: 10px;")
+        layout.addWidget(footer)
+
+        layout.addStretch(1)
 
     # ======================================================================
     # Slots
