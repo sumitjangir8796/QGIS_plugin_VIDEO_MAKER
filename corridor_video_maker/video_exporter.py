@@ -53,15 +53,24 @@ class VideoExporter(QObject):
 
     def __init__(self,
                  canvas,
-                 corridor_points,      # list of (x, y, bearing_deg)
-                 buffer_map_units,     # half-width of corridor view
+                 corridor_points,        # list of (x, y, bearing_deg)
+                 buffer_map_units,       # half-width of corridor view
                  video_path,
                  fps=25,
                  video_width=1920,
                  video_height=1080,
-                 total_distance_m=0.0, # total route length in metres
-                 start_label='',       # label shown at bar left end
-                 end_label='',         # label shown at bar right end
+                 total_distance_m=0.0,   # total route length in metres
+                 start_label='',         # label shown at bar left end
+                 end_label='',           # label shown at bar right end
+                 # ── split-view options ────────────────────────────────
+                 split_enabled=False,
+                 left_layer_ids=None,    # list of QGIS layer IDs for left panel
+                 right_layer_ids=None,   # list of QGIS layer IDs for right panel
+                 split_ratio=0.5,        # fraction of frame width for left panel
+                 div_color=(255,255,255),# BGR colour of divider line; None = hidden
+                 div_width=3,            # pixel width of divider line
+                 left_panel_label='',    # text drawn in upper-left of left panel
+                 right_panel_label='',   # text drawn in upper-left of right panel
                  parent=None):
         super().__init__(parent)
         self._canvas = canvas
@@ -74,6 +83,14 @@ class VideoExporter(QObject):
         self._total_dist_m = total_distance_m
         self._start_label = start_label
         self._end_label = end_label
+        self._split_enabled    = split_enabled
+        self._left_layer_ids   = left_layer_ids  or []
+        self._right_layer_ids  = right_layer_ids or []
+        self._split_ratio      = max(0.1, min(0.9, split_ratio))
+        self._div_color        = div_color
+        self._div_width        = div_width
+        self._left_panel_label = left_panel_label
+        self._right_panel_label= right_panel_label
         self._abort = False
 
     # ------------------------------------------------------------------
@@ -123,29 +140,36 @@ class VideoExporter(QObject):
             if self._abort:
                 break
 
-            img = self._render_frame(base_settings, cx, cy, bearing)
-            if img is None:
-                continue
-
-            # Convert QImage (RGB888) → numpy (H×W×3) → BGR for OpenCV
-            img = img.convertToFormat(QImage.Format_RGB888)
-            w, h = img.width(), img.height()
-            try:
-                ptr = img.bits()
-                ptr.setsize(h * w * 3)          # PyQt5 voidptr
-                arr = bytes(ptr)
-            except AttributeError:
-                arr = img.bits().tobytes()      # PyQt6 fallback
-
-            frame = np.frombuffer(arr, dtype=np.uint8).reshape(h, w, 3)
-            frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
-
-            # Resize to target dimensions if needed
-            if (w, h) != (self._width, self._height):
-                frame_bgr = cv2.resize(
-                    frame_bgr, (self._width, self._height),
-                    interpolation=cv2.INTER_LANCZOS4
+            if self._split_enabled:
+                frame_bgr = self._render_split_frame(
+                    base_settings, cx, cy, bearing, cv2, np
                 )
+                if frame_bgr is None:
+                    continue
+            else:
+                img = self._render_frame(base_settings, cx, cy, bearing)
+                if img is None:
+                    continue
+
+                # Convert QImage (RGB888) -> numpy (H x W x 3) -> BGR for OpenCV
+                img = img.convertToFormat(QImage.Format_RGB888)
+                w, h = img.width(), img.height()
+                try:
+                    ptr = img.bits()
+                    ptr.setsize(h * w * 3)          # PyQt5 voidptr
+                    arr = bytes(ptr)
+                except AttributeError:
+                    arr = img.bits().tobytes()      # PyQt6 fallback
+
+                frame = np.frombuffer(arr, dtype=np.uint8).reshape(h, w, 3)
+                frame_bgr = cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+                # Resize to target dimensions if needed
+                if (w, h) != (self._width, self._height):
+                    frame_bgr = cv2.resize(
+                        frame_bgr, (self._width, self._height),
+                        interpolation=cv2.INTER_LANCZOS4
+                    )
 
             # Draw distance progress bar overlay
             if self._total_dist_m > 0:
@@ -324,3 +348,139 @@ class VideoExporter(QObject):
         job.start()
         job.waitForFinished()
         return job.renderedImage()
+
+    # ------------------------------------------------------------------
+    # Split-view rendering
+    # ------------------------------------------------------------------
+
+    def _qimage_to_bgr(self, img, cv2, np):
+        """Convert a QImage to a BGR numpy array at the image's native size."""
+        img = img.convertToFormat(QImage.Format_RGB888)
+        w, h = img.width(), img.height()
+        try:
+            ptr = img.bits()
+            ptr.setsize(h * w * 3)
+            arr = bytes(ptr)
+        except AttributeError:
+            arr = img.bits().tobytes()
+        frame = np.frombuffer(arr, dtype=np.uint8).reshape(h, w, 3)
+        return cv2.cvtColor(frame, cv2.COLOR_RGB2BGR)
+
+    def _layer_objects_for_ids(self, base_settings, layer_ids):
+        """
+        Return a list of QgsMapLayer objects that are currently in
+        *base_settings* and whose id() is in *layer_ids*.
+        If *layer_ids* is empty, returns the full layer list (all visible).
+        """
+        all_layers = base_settings.layers()
+        if not layer_ids:
+            return all_layers
+        id_set = set(layer_ids)
+        return [lyr for lyr in all_layers if lyr.id() in id_set]
+
+    def _settings_for_panel(self, base_settings, cx, cy, bearing,
+                             panel_w, panel_h, layer_ids):
+        """
+        Build a QgsMapSettings for one split panel.
+
+        The extent and rotation are the same as the main frame; only the
+        output size and layer list differ.
+        """
+        settings = QgsMapSettings(base_settings)
+        settings.setOutputSize(QSize(panel_w, panel_h))
+
+        # Keep the same geographic extent centre + bearing
+        aspect  = panel_h / panel_w
+        half_w  = self._buffer
+        half_h  = self._buffer * aspect
+        extent  = QgsRectangle(cx - half_w, cy - half_h,
+                               cx + half_w, cy + half_h)
+        settings.setExtent(extent)
+
+        rotation = -bearing
+        if rotation <= -180:
+            rotation += 360
+        settings.setRotation(rotation)
+
+        layers = self._layer_objects_for_ids(base_settings, layer_ids)
+        if layers:
+            settings.setLayers(layers)
+        return settings
+
+    def _draw_panel_label(self, frame, text, cv2):
+        """Draw a small semi-transparent label in the upper-left corner."""
+        if not text:
+            return
+        font    = cv2.FONT_HERSHEY_SIMPLEX
+        scale   = max(0.55, self._height / 1000.0)
+        thick   = max(1, int(scale * 1.8))
+        pad     = max(8, int(self._height * 0.012))
+        (tw, th), bl = cv2.getTextSize(text, font, scale, thick)
+        # Background pill
+        x0, y0 = pad, pad
+        x1, y1 = x0 + tw + pad, y0 + th + bl + pad
+        import numpy as np
+        overlay = frame.copy()
+        cv2.rectangle(overlay, (x0 - 4, y0 - 4), (x1 + 4, y1 + 4),
+                      (0, 0, 0), -1)
+        cv2.addWeighted(overlay, 0.55, frame, 0.45, 0, frame)
+        # Text
+        cv2.putText(frame, text, (x0, y0 + th),
+                    font, scale, (0, 0, 0), thick + 2, cv2.LINE_AA)
+        cv2.putText(frame, text, (x0, y0 + th),
+                    font, scale, (230, 230, 230), thick, cv2.LINE_AA)
+
+    def _render_split_frame(self, base_settings, cx, cy, bearing, cv2, np):
+        """
+        Render left and right panels independently and composite them
+        side-by-side into a single (self._width x self._height) BGR frame.
+        """
+        left_w  = max(1, int(self._width * self._split_ratio))
+        right_w = max(1, self._width - left_w)
+        h       = self._height
+
+        # Render each panel
+        left_settings  = self._settings_for_panel(
+            base_settings, cx, cy, bearing, left_w,  h, self._left_layer_ids)
+        right_settings = self._settings_for_panel(
+            base_settings, cx, cy, bearing, right_w, h, self._right_layer_ids)
+
+        left_job  = QgsMapRendererSequentialJob(left_settings)
+        right_job = QgsMapRendererSequentialJob(right_settings)
+
+        left_job.start()
+        left_job.waitForFinished()
+        right_job.start()
+        right_job.waitForFinished()
+
+        left_img  = left_job.renderedImage()
+        right_img = right_job.renderedImage()
+
+        if left_img is None or right_img is None:
+            return None
+
+        left_bgr  = self._qimage_to_bgr(left_img,  cv2, np)
+        right_bgr = self._qimage_to_bgr(right_img, cv2, np)
+
+        # Ensure exact pixel dimensions (renderer may round)
+        if left_bgr.shape[:2] != (h, left_w):
+            left_bgr  = cv2.resize(left_bgr,  (left_w,  h), interpolation=cv2.INTER_LANCZOS4)
+        if right_bgr.shape[:2] != (h, right_w):
+            right_bgr = cv2.resize(right_bgr, (right_w, h), interpolation=cv2.INTER_LANCZOS4)
+
+        # Draw per-panel labels
+        self._draw_panel_label(left_bgr,  self._left_panel_label,  cv2)
+        self._draw_panel_label(right_bgr, self._right_panel_label, cv2)
+
+        # Composite side by side
+        frame = np.hstack([left_bgr, right_bgr])
+
+        # Draw divider line
+        if self._div_color is not None and self._div_width > 0:
+            dw   = max(1, self._div_width)
+            half = dw // 2
+            x    = left_w
+            cv2.line(frame, (x - half, 0), (x - half, h - 1),
+                     self._div_color, dw, cv2.LINE_AA)
+
+        return frame

@@ -1,13 +1,24 @@
-# -*- coding: utf-8 -*-
+﻿# -*- coding: utf-8 -*-
 """
 Dialog for Corridor Video Maker.
 
-Provides the full UI:
-  • Centerline layer selector
-  • "Pick start point" map-click tool (green = first vertex, red = last)
-  • Speed / FPS / buffer / resolution settings
-  • Output file browser
-  • Progress bar + Generate / Cancel / Close buttons
+Provides the full UI split across two tabs:
+
+Tab 1 - Standard
+    * Centerline layer selector
+    * "Pick start point" map-click tool
+    * Speed / FPS / buffer / resolution / smooth settings
+    * Distance bar overlay labels
+    * Output file browser
+
+Tab 2 - Advanced Frame Designer
+    * Enable / disable split view
+    * Divider position slider (10-90 %)
+    * Divider line colour & width
+    * Per-panel labels (shown in the video)
+    * Two mirrored layer-tree pickers (Left panel / Right panel)
+      with check-boxes for every layer and group in the project
+    * Refresh button to re-scan layers after project changes
 """
 
 import os
@@ -19,10 +30,12 @@ from qgis.PyQt.QtWidgets import (
     QGroupBox, QLabel, QComboBox, QPushButton, QLineEdit,
     QSpinBox, QDoubleSpinBox, QProgressBar, QFileDialog,
     QSizePolicy, QMessageBox, QApplication,
+    QTabWidget, QWidget, QTreeWidget, QTreeWidgetItem,
+    QSlider, QScrollArea, QCheckBox, QFrame,
 )
 from qgis.core import (
     QgsProject, QgsWkbTypes, QgsMapLayerProxyModel,
-    QgsVectorLayer,
+    QgsVectorLayer, QgsLayerTreeGroup, QgsLayerTreeLayer,
 )
 from qgis.gui import QgsMapLayerComboBox
 
@@ -33,6 +46,20 @@ from .utils import (
 )
 from .map_tools import EndpointPickerTool
 from .video_exporter import VideoExporter
+
+
+# ---------------------------------------------------------------------------
+# Colour presets for the divider line  (stored as BGR tuples for OpenCV)
+# ---------------------------------------------------------------------------
+_DIV_COLOURS = {
+    "White":      (255, 255, 255),
+    "Light Grey": (180, 180, 180),
+    "Dark Grey":  (80,  80,  80),
+    "Black":      (0,   0,   0),
+    "Yellow":     (0,   255, 255),
+    "Red":        (0,   0,   255),
+    "None":       None,
+}
 
 
 # ---------------------------------------------------------------------------
@@ -63,54 +90,115 @@ class CorridorVideoMakerDialog(QDialog):
 
         self._picker_tool = None
         self._prev_tool = None
-        self._start_reversed = False   # False = start at first vertex
+        self._start_reversed = False
         self._exporter = None
         self._worker = None
 
         self.setWindowTitle("Corridor Video Maker")
-        self.setMinimumWidth(480)
+        self.setMinimumWidth(580)
+        self.setMinimumHeight(540)
         self._build_ui()
 
-    # ------------------------------------------------------------------
-    # UI construction
-    # ------------------------------------------------------------------
+    # ======================================================================
+    # UI Construction
+    # ======================================================================
 
     def _build_ui(self):
-        root = QVBoxLayout(self)
+        main = QVBoxLayout(self)
+        main.setContentsMargins(8, 8, 8, 6)
+        main.setSpacing(6)
 
-        # ── Layer group ────────────────────────────────────────────────
+        # Tab container
+        self._tabs = QTabWidget()
+        main.addWidget(self._tabs, 1)
+
+        # Tab 1: Standard settings
+        std_scroll = QScrollArea()
+        std_scroll.setWidgetResizable(True)
+        std_scroll.setFrameShape(QFrame.NoFrame)
+        std_widget = QWidget()
+        std_scroll.setWidget(std_widget)
+        root = QVBoxLayout(std_widget)
+        root.setContentsMargins(6, 6, 6, 6)
+        root.setSpacing(8)
+        self._build_standard_tab(root)
+        root.addStretch(1)
+        self._tabs.addTab(std_scroll, "Standard")
+
+        # Tab 2: Advanced Frame Designer
+        adv_scroll = QScrollArea()
+        adv_scroll.setWidgetResizable(True)
+        adv_scroll.setFrameShape(QFrame.NoFrame)
+        adv_widget = QWidget()
+        adv_scroll.setWidget(adv_widget)
+        self._build_advanced_tab(adv_widget)
+        self._tabs.addTab(adv_scroll, "Advanced - Frame Designer")
+
+        # Progress bar (always visible, outside tabs)
+        self.progress = QProgressBar()
+        self.progress.setRange(0, 100)
+        self.progress.setValue(0)
+        main.addWidget(self.progress)
+
+        self.lbl_status = QLabel("")
+        self.lbl_status.setAlignment(Qt.AlignCenter)
+        main.addWidget(self.lbl_status)
+
+        # Buttons (always visible)
+        row_btns = QHBoxLayout()
+
+        self.btn_generate = QPushButton("Play  Generate Video")
+        self.btn_generate.setDefault(True)
+        self.btn_generate.setFixedHeight(36)
+        self.btn_generate.clicked.connect(self._on_generate)
+        row_btns.addWidget(self.btn_generate)
+
+        self.btn_cancel = QPushButton("Stop  Cancel")
+        self.btn_cancel.setEnabled(False)
+        self.btn_cancel.clicked.connect(self._on_cancel)
+        row_btns.addWidget(self.btn_cancel)
+
+        btn_close = QPushButton("Close")
+        btn_close.clicked.connect(self.close)
+        row_btns.addWidget(btn_close)
+
+        main.addLayout(row_btns)
+
+    # ------------------------------------------------------------------
+    # Tab 1: Standard
+    # ------------------------------------------------------------------
+
+    def _build_standard_tab(self, root):
+        """Add all Standard-tab widgets to root (a QVBoxLayout)."""
+
+        # Layer group
         grp_layer = QGroupBox("1. Centerline Layer")
         lay_layer = QVBoxLayout()
-
         self.cb_layer = QgsMapLayerComboBox()
         self.cb_layer.setFilters(QgsMapLayerProxyModel.LineLayer)
         lay_layer.addWidget(self.cb_layer)
-
         grp_layer.setLayout(lay_layer)
         root.addWidget(grp_layer)
 
-        # ── Start point group ──────────────────────────────────────────
+        # Start point group
         grp_start = QGroupBox("2. Start Point  (click map to choose end)")
         lay_start = QVBoxLayout()
-
         row_btn = QHBoxLayout()
-        self.btn_pick = QPushButton("🖱  Pick Start Point from Map")
+        self.btn_pick = QPushButton("Pick Start Point from Map")
         self.btn_pick.setToolTip(
             "Click near the vertex you want to START from.\n"
             "Green marker = first vertex, Red = last vertex."
         )
         self.btn_pick.clicked.connect(self._activate_picker)
         row_btn.addWidget(self.btn_pick)
-
         self.lbl_start = QLabel("No start point selected yet.")
         self.lbl_start.setStyleSheet("color: grey;")
         lay_start.addLayout(row_btn)
         lay_start.addWidget(self.lbl_start)
-
         grp_start.setLayout(lay_start)
         root.addWidget(grp_start)
 
-        # ── Travel settings ────────────────────────────────────────────
+        # Travel & Display Settings
         grp_travel = QGroupBox("3. Travel & Display Settings")
         g = QGridLayout()
 
@@ -130,7 +218,7 @@ class CorridorVideoMakerDialog(QDialog):
 
         g.addWidget(QLabel("Corridor buffer (m):"), 2, 0)
         self.sb_buffer = QDoubleSpinBox()
-        self.sb_buffer.setRange(1.0, 100_000.0)
+        self.sb_buffer.setRange(1.0, 100000.0)
         self.sb_buffer.setValue(100.0)
         self.sb_buffer.setSuffix(" m")
         self.sb_buffer.setToolTip(
@@ -169,7 +257,7 @@ class CorridorVideoMakerDialog(QDialog):
         grp_travel.setLayout(g)
         root.addWidget(grp_travel)
 
-        # ── Distance bar overlay ───────────────────────────────────────
+        # Distance Bar Overlay
         grp_bar = QGroupBox("4. Distance Bar Overlay")
         gb = QGridLayout()
 
@@ -186,54 +274,173 @@ class CorridorVideoMakerDialog(QDialog):
         grp_bar.setLayout(gb)
         root.addWidget(grp_bar)
 
-        # ── Output file ────────────────────────────────────────────────
+        # Output Video File
         grp_out = QGroupBox("5. Output Video File")
         lay_out = QHBoxLayout()
-
         self.le_output = QLineEdit()
-        self.le_output.setPlaceholderText("Select output .mp4 file …")
+        self.le_output.setPlaceholderText("Select output .mp4 file ...")
         lay_out.addWidget(self.le_output)
-
-        btn_browse = QPushButton("Browse …")
+        btn_browse = QPushButton("Browse ...")
         btn_browse.clicked.connect(self._browse_output)
         lay_out.addWidget(btn_browse)
-
         grp_out.setLayout(lay_out)
         root.addWidget(grp_out)
 
-        # ── Progress ───────────────────────────────────────────────────
-        self.progress = QProgressBar()
-        self.progress.setRange(0, 100)
-        self.progress.setValue(0)
-        root.addWidget(self.progress)
-
-        self.lbl_status = QLabel("")
-        self.lbl_status.setAlignment(Qt.AlignCenter)
-        root.addWidget(self.lbl_status)
-
-        # ── Buttons ────────────────────────────────────────────────────
-        row_btns = QHBoxLayout()
-
-        self.btn_generate = QPushButton("▶  Generate Video")
-        self.btn_generate.setDefault(True)
-        self.btn_generate.setFixedHeight(36)
-        self.btn_generate.clicked.connect(self._on_generate)
-        row_btns.addWidget(self.btn_generate)
-
-        self.btn_cancel = QPushButton("⏹  Cancel")
-        self.btn_cancel.setEnabled(False)
-        self.btn_cancel.clicked.connect(self._on_cancel)
-        row_btns.addWidget(self.btn_cancel)
-
-        btn_close = QPushButton("Close")
-        btn_close.clicked.connect(self.close)
-        row_btns.addWidget(btn_close)
-
-        root.addLayout(row_btns)
-
     # ------------------------------------------------------------------
+    # Tab 2: Advanced Frame Designer
+    # ------------------------------------------------------------------
+
+    def _build_advanced_tab(self, widget):
+        """Build the Advanced tab content inside widget."""
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        info = QLabel(
+            "<b>Frame Designer</b>  - optionally split the video frame into a "
+            "<b>left</b> and a <b>right</b> panel, each rendering different layers."
+        )
+        info.setWordWrap(True)
+        info.setTextFormat(Qt.RichText)
+        layout.addWidget(info)
+
+        # Enable split view group
+        grp_split = QGroupBox("Split View")
+        grp_split_lay = QVBoxLayout(grp_split)
+
+        self.chk_split = QCheckBox("Enable split view  (left panel  |  right panel)")
+        self.chk_split.setChecked(False)
+        self.chk_split.toggled.connect(self._on_split_enabled_toggled)
+        grp_split_lay.addWidget(self.chk_split)
+
+        # Designer container - shown only when split is enabled
+        self._split_designer = QWidget()
+        self._split_designer.setVisible(False)
+        grp_split_lay.addWidget(self._split_designer)
+
+        sd = QVBoxLayout(self._split_designer)
+        sd.setContentsMargins(0, 6, 0, 0)
+        sd.setSpacing(8)
+
+        # Divider position
+        div_pos_grp = QGroupBox("Divider Position")
+        div_pos_lay = QHBoxLayout(div_pos_grp)
+        div_pos_lay.addWidget(QLabel("Left width:"))
+        self.sl_ratio = QSlider(Qt.Horizontal)
+        self.sl_ratio.setRange(10, 90)
+        self.sl_ratio.setValue(50)
+        self.sl_ratio.setTickPosition(QSlider.TicksBelow)
+        self.sl_ratio.setTickInterval(10)
+        self.sl_ratio.valueChanged.connect(self._on_ratio_changed)
+        div_pos_lay.addWidget(self.sl_ratio)
+        self.lbl_ratio = QLabel("50 %  |  50 %")
+        self.lbl_ratio.setMinimumWidth(90)
+        self.lbl_ratio.setAlignment(Qt.AlignCenter)
+        div_pos_lay.addWidget(self.lbl_ratio)
+        sd.addWidget(div_pos_grp)
+
+        # Divider line style
+        div_line_grp = QGroupBox("Divider Line Style")
+        div_line_lay = QHBoxLayout(div_line_grp)
+        div_line_lay.addWidget(QLabel("Colour:"))
+        self.cb_div_color = QComboBox()
+        for name in _DIV_COLOURS:
+            self.cb_div_color.addItem(name)
+        self.cb_div_color.setCurrentIndex(0)
+        div_line_lay.addWidget(self.cb_div_color)
+        div_line_lay.addSpacing(14)
+        div_line_lay.addWidget(QLabel("Width:"))
+        self.sb_div_w = QSpinBox()
+        self.sb_div_w.setRange(0, 20)
+        self.sb_div_w.setValue(3)
+        self.sb_div_w.setSuffix(" px")
+        div_line_lay.addWidget(self.sb_div_w)
+        div_line_lay.addStretch()
+        sd.addWidget(div_line_grp)
+
+        # Panel overlay labels
+        lbl_grp = QGroupBox("Panel Labels  (shown in video, upper-left of each panel)")
+        lbl_grid = QGridLayout(lbl_grp)
+        lbl_grid.addWidget(QLabel("Left panel label:"), 0, 0)
+        self.le_left_label = QLineEdit()
+        self.le_left_label.setPlaceholderText("e.g.  Satellite  (optional)")
+        lbl_grid.addWidget(self.le_left_label, 0, 1)
+        lbl_grid.addWidget(QLabel("Right panel label:"), 1, 0)
+        self.le_right_label = QLineEdit()
+        self.le_right_label.setPlaceholderText("e.g.  Topographic  (optional)")
+        lbl_grid.addWidget(self.le_right_label, 1, 1)
+        sd.addWidget(lbl_grp)
+
+        # Layer picker trees
+        trees_grp = QGroupBox("Layer / Group Visibility per Panel")
+        trees_lay = QVBoxLayout(trees_grp)
+
+        hint = QLabel(
+            "Check the layers you want visible in each panel.\n"
+            "Unchecked layers are hidden for that panel during rendering."
+        )
+        hint.setWordWrap(True)
+        trees_lay.addWidget(hint)
+
+        btn_refresh = QPushButton("Refresh  Refresh layer list from project")
+        btn_refresh.setToolTip("Re-scan all layers/groups from the current QGIS project.")
+        btn_refresh.clicked.connect(self._populate_split_trees)
+        trees_lay.addWidget(btn_refresh)
+
+        trees_cols = QHBoxLayout()
+
+        # Left tree
+        left_box = QGroupBox("Left Panel")
+        left_box_lay = QVBoxLayout(left_box)
+        self.tree_left = QTreeWidget()
+        self.tree_left.setHeaderLabel("Layer / Group")
+        self.tree_left.setColumnCount(1)
+        self.tree_left.setAlternatingRowColors(True)
+        self.tree_left.setMinimumHeight(200)
+        left_box_lay.addWidget(self.tree_left)
+        lq = QHBoxLayout()
+        btn_lall  = QPushButton("All")
+        btn_lnone = QPushButton("None")
+        btn_lall.setFixedHeight(22)
+        btn_lnone.setFixedHeight(22)
+        btn_lall.clicked.connect(lambda: self._set_all_check(self.tree_left, Qt.Checked))
+        btn_lnone.clicked.connect(lambda: self._set_all_check(self.tree_left, Qt.Unchecked))
+        lq.addWidget(btn_lall)
+        lq.addWidget(btn_lnone)
+        lq.addStretch()
+        left_box_lay.addLayout(lq)
+        trees_cols.addWidget(left_box)
+
+        # Right tree
+        right_box = QGroupBox("Right Panel")
+        right_box_lay = QVBoxLayout(right_box)
+        self.tree_right = QTreeWidget()
+        self.tree_right.setHeaderLabel("Layer / Group")
+        self.tree_right.setColumnCount(1)
+        self.tree_right.setAlternatingRowColors(True)
+        self.tree_right.setMinimumHeight(200)
+        right_box_lay.addWidget(self.tree_right)
+        rq = QHBoxLayout()
+        btn_rall  = QPushButton("All")
+        btn_rnone = QPushButton("None")
+        btn_rall.setFixedHeight(22)
+        btn_rnone.setFixedHeight(22)
+        btn_rall.clicked.connect(lambda: self._set_all_check(self.tree_right, Qt.Checked))
+        btn_rnone.clicked.connect(lambda: self._set_all_check(self.tree_right, Qt.Unchecked))
+        rq.addWidget(btn_rall)
+        rq.addWidget(btn_rnone)
+        rq.addStretch()
+        right_box_lay.addLayout(rq)
+        trees_cols.addWidget(right_box)
+
+        trees_lay.addLayout(trees_cols)
+        sd.addWidget(trees_grp, 1)
+
+        layout.addWidget(grp_split, 1)
+
+    # ======================================================================
     # Slots
-    # ------------------------------------------------------------------
+    # ======================================================================
 
     @pyqtSlot()
     def _activate_picker(self):
@@ -248,7 +455,7 @@ class CorridorVideoMakerDialog(QDialog):
         self._picker_tool.cancelled.connect(self._on_pick_cancelled)
         self.canvas.setMapTool(self._picker_tool)
 
-        self.lbl_start.setText("Click on the map near the vertex you want to START from …")
+        self.lbl_start.setText("Click on the map near the vertex you want to START from ...")
         self.lbl_start.setStyleSheet("color: #0055aa;")
 
     @pyqtSlot(bool)
@@ -286,9 +493,19 @@ class CorridorVideoMakerDialog(QDialog):
                 path += ".mp4"
             self.le_output.setText(path)
 
+    @pyqtSlot(bool)
+    def _on_split_enabled_toggled(self, checked: bool):
+        self._split_designer.setVisible(checked)
+        if checked and self.tree_left.topLevelItemCount() == 0:
+            self._populate_split_trees()
+
+    @pyqtSlot(int)
+    def _on_ratio_changed(self, value: int):
+        self.lbl_ratio.setText(f"{value} %  |  {100 - value} %")
+
     @pyqtSlot()
     def _on_generate(self):
-        # ── Validate inputs ────────────────────────────────────────────
+        # Validate inputs
         layer = self.cb_layer.currentLayer()
         if layer is None:
             QMessageBox.warning(self, "Error", "Select a centerline layer.")
@@ -304,20 +521,17 @@ class CorridorVideoMakerDialog(QDialog):
             QMessageBox.warning(self, "Error", "Choose an output video file.")
             return
 
-        fps = self.sb_fps.value()
-        speed_ms = self.sb_speed.value()
-        buffer_m = self.sb_buffer.value()
-        vid_w = self.sb_width.value()
-        vid_h = self.sb_height.value()
-
+        fps       = self.sb_fps.value()
+        speed_ms  = self.sb_speed.value()
+        buffer_m  = self.sb_buffer.value()
+        vid_w     = self.sb_width.value()
+        vid_h     = self.sb_height.value()
         layer_crs = layer.crs()
 
-        # Step per frame in map units
         step_m_per_frame = speed_ms / fps
-        step_map = project_step_to_map_units(step_m_per_frame, layer_crs)
+        step_map   = project_step_to_map_units(step_m_per_frame, layer_crs)
         buffer_map = project_step_to_map_units(buffer_m, layer_crs)
 
-        # Read distance bar labels
         start_label = self.le_start_name.text().strip()
         end_label   = self.le_end_name.text().strip()
 
@@ -325,12 +539,11 @@ class CorridorVideoMakerDialog(QDialog):
             QMessageBox.warning(self, "Error", "Invalid step distance.")
             return
 
-        # ── Build corridor points ──────────────────────────────────────
-        self.lbl_status.setText("Interpolating corridor points …")
+        # Build corridor points
+        self.lbl_status.setText("Interpolating corridor points ...")
         QApplication.processEvents()
 
         smooth_window = self.sb_smooth.value()
-
         points = interpolate_corridor_points(
             geom, step_map, reverse=self._start_reversed,
             layer_crs=layer_crs, smooth_window=smooth_window
@@ -342,15 +555,45 @@ class CorridorVideoMakerDialog(QDialog):
                                 "Check that the layer contains a valid polyline.")
             return
 
-        total_frames = len(points)
-        duration_s = total_frames / fps
+        total_frames     = len(points)
+        duration_s       = total_frames / fps
         total_distance_m = step_m_per_frame * max(total_frames - 1, 1)
         self.lbl_status.setText(
-            f"Rendering {total_frames} frames  "
-            f"({duration_s:.1f} s at {fps} fps) …"
+            f"Rendering {total_frames} frames  ({duration_s:.1f} s at {fps} fps) ..."
         )
 
-        # ── Set up exporter on a worker thread ─────────────────────────
+        # Collect split-view settings
+        split_enabled     = self.chk_split.isChecked()
+        left_layer_ids    = []
+        right_layer_ids   = []
+        split_ratio       = 0.5
+        div_color         = (255, 255, 255)
+        div_width         = 3
+        left_panel_label  = ""
+        right_panel_label = ""
+
+        if split_enabled:
+            left_layer_ids    = self._get_checked_layer_ids(self.tree_left)
+            right_layer_ids   = self._get_checked_layer_ids(self.tree_right)
+            split_ratio       = self.sl_ratio.value() / 100.0
+            colour_name       = self.cb_div_color.currentText()
+            div_color         = _DIV_COLOURS.get(colour_name, (255, 255, 255))
+            div_width         = self.sb_div_w.value()
+            left_panel_label  = self.le_left_label.text().strip()
+            right_panel_label = self.le_right_label.text().strip()
+
+            if not left_layer_ids and not right_layer_ids:
+                reply = QMessageBox.question(
+                    self, "No Layers Selected",
+                    "No layers are checked for either panel.\n"
+                    "Both panels will render all visible layers.\n\nContinue?",
+                    QMessageBox.Yes | QMessageBox.No
+                )
+                if reply != QMessageBox.Yes:
+                    self.lbl_status.setText("")
+                    return
+
+        # Create exporter
         self._exporter = VideoExporter(
             canvas=self.canvas,
             corridor_points=points,
@@ -362,6 +605,14 @@ class CorridorVideoMakerDialog(QDialog):
             total_distance_m=total_distance_m,
             start_label=start_label,
             end_label=end_label,
+            split_enabled=split_enabled,
+            left_layer_ids=left_layer_ids,
+            right_layer_ids=right_layer_ids,
+            split_ratio=split_ratio,
+            div_color=div_color,
+            div_width=div_width,
+            left_panel_label=left_panel_label,
+            right_panel_label=right_panel_label,
         )
         self._exporter.progressChanged.connect(self._on_progress)
         self._exporter.finished.connect(self._on_finished)
@@ -378,7 +629,7 @@ class CorridorVideoMakerDialog(QDialog):
     def _on_cancel(self):
         if self._exporter:
             self._exporter.abort()
-        self.lbl_status.setText("Cancelling …")
+        self.lbl_status.setText("Cancelling ...")
         self.btn_cancel.setEnabled(False)
 
     @pyqtSlot(int)
@@ -393,23 +644,114 @@ class CorridorVideoMakerDialog(QDialog):
 
         if path:
             self.lbl_status.setText(f"Done!  Saved: {path}")
-            QMessageBox.information(
-                self, "Done",
-                f"Video saved successfully:\n{path}"
-            )
+            QMessageBox.information(self, "Done", f"Video saved successfully:\n{path}")
         else:
-            self.lbl_status.setText("Cancelled or failed – no video saved.")
+            self.lbl_status.setText("Cancelled or failed - no video saved.")
 
     @pyqtSlot(str)
     def _on_error(self, msg: str):
         QMessageBox.critical(self, "Export Error", msg)
-        self.lbl_status.setText("Error – see message.")
+        self.lbl_status.setText("Error - see message.")
         self.btn_generate.setEnabled(True)
         self.btn_cancel.setEnabled(False)
 
-    # ------------------------------------------------------------------
+    # ======================================================================
+    # Advanced tab helpers
+    # ======================================================================
+
+    @pyqtSlot()
+    def _populate_split_trees(self):
+        """Re-populate both layer trees from the current QGIS project."""
+        prev_left  = self._save_check_states(self.tree_left)
+        prev_right = self._save_check_states(self.tree_right)
+
+        self.tree_left.clear()
+        self.tree_right.clear()
+
+        root_node = QgsProject.instance().layerTreeRoot()
+        self._fill_tree(self.tree_left,  self.tree_left.invisibleRootItem(),
+                        root_node, prev_left,  default=Qt.Checked)
+        self._fill_tree(self.tree_right, self.tree_right.invisibleRootItem(),
+                        root_node, prev_right, default=Qt.Checked)
+
+        self.tree_left.expandAll()
+        self.tree_right.expandAll()
+
+    def _fill_tree(self, tree_widget, parent_item, tree_node,
+                   prev_states: dict, default):
+        """Recursively mirror the QGIS layer tree into tree_widget."""
+        for child in tree_node.children():
+            if isinstance(child, QgsLayerTreeGroup):
+                grp_item = QTreeWidgetItem(parent_item, [child.name()])
+                grp_item.setFlags(
+                    grp_item.flags()
+                    | Qt.ItemIsUserCheckable
+                    | Qt.ItemIsAutoTristate
+                )
+                grp_item.setCheckState(0, Qt.Checked)
+                grp_item.setData(0, Qt.UserRole, None)
+                self._fill_tree(tree_widget, grp_item, child, prev_states, default)
+
+            elif isinstance(child, QgsLayerTreeLayer):
+                lyr = child.layer()
+                if lyr is None:
+                    continue
+                lyr_item = QTreeWidgetItem(parent_item, [lyr.name()])
+                lyr_item.setFlags(lyr_item.flags() | Qt.ItemIsUserCheckable)
+                state = prev_states.get(lyr.id(), default)
+                lyr_item.setCheckState(0, state)
+                lyr_item.setData(0, Qt.UserRole, lyr.id())
+
+    @staticmethod
+    def _save_check_states(tree_widget) -> dict:
+        """Return {layer_id: Qt.CheckState} for all leaf items."""
+        states = {}
+
+        def traverse(item):
+            lid = item.data(0, Qt.UserRole)
+            if lid is not None:
+                states[lid] = item.checkState(0)
+            for i in range(item.childCount()):
+                traverse(item.child(i))
+
+        root = tree_widget.invisibleRootItem()
+        for i in range(root.childCount()):
+            traverse(root.child(i))
+        return states
+
+    @staticmethod
+    def _get_checked_layer_ids(tree_widget) -> list:
+        """Return list of layer IDs for all checked leaf items."""
+        ids = []
+
+        def traverse(item):
+            lid = item.data(0, Qt.UserRole)
+            if lid is not None:
+                if item.checkState(0) == Qt.Checked:
+                    ids.append(lid)
+            for i in range(item.childCount()):
+                traverse(item.child(i))
+
+        root = tree_widget.invisibleRootItem()
+        for i in range(root.childCount()):
+            traverse(root.child(i))
+        return ids
+
+    @staticmethod
+    def _set_all_check(tree_widget, state):
+        """Set all items in tree_widget to state."""
+        def traverse(item):
+            item.setCheckState(0, state)
+            for i in range(item.childCount()):
+                traverse(item.child(i))
+
+        root = tree_widget.invisibleRootItem()
+        for i in range(root.childCount()):
+            traverse(root.child(i))
+
+    # ======================================================================
     # Helpers
-    # ------------------------------------------------------------------
+    # ======================================================================
 
     def _first_geom(self, layer):
         if layer is None:
@@ -418,18 +760,15 @@ class CorridorVideoMakerDialog(QDialog):
         if not feats:
             return None
         g = feats[0].geometry()
-        # Merge multi-part to single part if needed
         if g.isMultipart():
             g = g.mergeLines()
         return g
 
     def closeEvent(self, event):
-        # Abort any running export
         if self._exporter:
             self._exporter.abort()
         if self._worker and self._worker.isRunning():
             self._worker.wait(3000)
-        # Restore the previous map tool if picker is still active
         if self._picker_tool and self.canvas.mapTool() is self._picker_tool:
             if self._prev_tool:
                 self.canvas.setMapTool(self._prev_tool)
