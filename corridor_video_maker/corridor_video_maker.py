@@ -28,26 +28,46 @@ def _find_python():
     Return the path to a working python.exe inside the QGIS installation.
 
     On some installs sys.executable is qgis.exe / qgis-ltr-bin.exe, not python.
-    We search known locations relative to the QGIS bin folder.
+    We use QgsApplication.prefixPath() to find the QGIS root reliably on any PC.
     """
-    import sys, os
+    import sys, os, glob
 
-    # 1. sys.executable itself – works on most installs
+    # 1. BEST: use QGIS's own API to locate the installation root
+    try:
+        from qgis.core import QgsApplication
+        qgis_root = QgsApplication.prefixPath()   # e.g. C:/Program Files/QGIS 3.40.11
+        # prefixPath usually points to QGIS\apps\qgis  – go up to the QGIS root
+        # Handle both  …\apps\qgis  and  …\QGIS x.y.z
+        for candidate_root in (
+            os.path.dirname(qgis_root),             # …\apps\qgis  → …\apps? try parent
+            os.path.dirname(os.path.dirname(qgis_root)),  # two levels up
+            qgis_root,
+        ):
+            for pat in [
+                os.path.join(candidate_root, "apps", "Python3*", "python.exe"),
+                os.path.join(candidate_root, "Python3*", "python.exe"),
+            ]:
+                hits = sorted(glob.glob(pat), reverse=True)
+                if hits:
+                    return hits[0]
+    except Exception:
+        pass
+
+    # 2. sys.executable itself – works when QGIS ships a real python.exe
     exe = sys.executable
     base = os.path.basename(exe).lower()
     if "python" in base:
         return exe
 
-    # 2. Look for python3.exe / python.exe siblings of qgis*.exe
+    # 3. Look for python3.exe / python.exe siblings of qgis*.exe
     qgis_bin = os.path.dirname(exe)
     for name in ("python3.exe", "python.exe"):
         candidate = os.path.join(qgis_bin, name)
         if os.path.isfile(candidate):
             return candidate
 
-    # 3. Walk up one level (e.g. C:\Program Files\QGIS 3.x\bin\ -> apps\Python3xx\)
+    # 4. Scan Program Files for any QGIS Python
     qgis_root = os.path.dirname(qgis_bin)
-    import glob
     patterns = [
         os.path.join(qgis_root, "apps", "Python3*", "python.exe"),
         os.path.join(qgis_root, "apps", "Python3*", "python3.exe"),
