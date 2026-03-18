@@ -349,7 +349,7 @@ class VideoExporter(QObject):
                 d   = int(v)
                 m   = int((v - d) * 60)
                 s   = (v - d - m / 60.0) * 3600.0
-                return f"{d}d {m}m {s:.2f}s {ch}"
+                return f"{d}d {m:02d}' {s:05.2f}\" {ch}"
 
             coord_txt = f"Lat: {_to_dms(lat, 'N', 'S')}    Lon: {_to_dms(lon, 'E', 'W')}"
 
