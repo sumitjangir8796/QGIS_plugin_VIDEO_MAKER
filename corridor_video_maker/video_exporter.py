@@ -33,6 +33,10 @@ from qgis.core import (
     QgsRectangle,
     QgsMapRendererSequentialJob,
     QgsApplication,
+    QgsCoordinateReferenceSystem,
+    QgsCoordinateTransform,
+    QgsPointXY,
+    QgsProject,
 )
 
 
@@ -62,6 +66,7 @@ class VideoExporter(QObject):
                  total_distance_m=0.0,   # total route length in metres
                  start_label='',         # label shown at bar left end
                  end_label='',           # label shown at bar right end
+                 layer_crs=None,          # QgsCoordinateReferenceSystem of the corridor
                  # ── split-view options ────────────────────────────────
                  split_enabled=False,
                  left_layer_ids=None,    # list of QGIS layer IDs for left panel
@@ -83,6 +88,18 @@ class VideoExporter(QObject):
         self._total_dist_m = total_distance_m
         self._start_label = start_label
         self._end_label = end_label
+
+        # Build coordinate transform to WGS84 for lat/lon display
+        wgs84 = QgsCoordinateReferenceSystem("EPSG:4326")
+        src_crs = layer_crs if (layer_crs and layer_crs.isValid()) else \
+                  self._canvas.mapSettings().destinationCrs()
+        try:
+            self._to_wgs84 = QgsCoordinateTransform(
+                src_crs, wgs84, QgsProject.instance()
+            )
+        except Exception:
+            self._to_wgs84 = None
+
         self._split_enabled    = split_enabled
         self._left_layer_ids   = left_layer_ids  or []
         self._right_layer_ids  = right_layer_ids or []
@@ -177,6 +194,7 @@ class VideoExporter(QObject):
                     frame_bgr, idx, total,
                     self._total_dist_m,
                     self._start_label, self._end_label,
+                    cx, cy,
                     cv2, np
                 )
 
@@ -201,7 +219,7 @@ class VideoExporter(QObject):
     # ------------------------------------------------------------------
 
     def _draw_distance_bar(self, frame, idx, total, total_dist_m,
-                           start_label, end_label, cv2, np):
+                           start_label, end_label, cx, cy, cv2, np):
         """
         Draw a semi-transparent distance progress bar at the bottom of *frame*.
 
@@ -209,6 +227,7 @@ class VideoExporter(QObject):
         ───────────────────────────────────
         [START_NAME]   ━━━━━━━━━●──────   [END_NAME]
                            1.25 km
+                    12.345678°N  98.765432°E
         """
         h, w = frame.shape[:2]
 
@@ -315,6 +334,33 @@ class VideoExporter(QObject):
             _put_label(start_label, track_x0)
         if end_label:
             _put_label(end_label, track_x1, align_right=True)
+
+        # ── Lat / Lon display ─────────────────────────────────────────────
+        try:
+            if self._to_wgs84 is not None:
+                pt = self._to_wgs84.transform(QgsPointXY(cx, cy))
+                lat, lon = pt.y(), pt.x()
+            else:
+                lat, lon = cy, cx   # already geographic
+
+            lat_ch = 'N' if lat >= 0 else 'S'
+            lon_ch = 'E' if lon >= 0 else 'W'
+            coord_txt = f"{abs(lat):.6f}{chr(176)}{lat_ch}   {abs(lon):.6f}{chr(176)}{lon_ch}"
+
+            c_scale = max(0.38, bar_h / 170.0)
+            c_thick = max(1, int(c_scale * 1.5))
+            (cw, ch2), _ = cv2.getTextSize(coord_txt, font, c_scale, c_thick)
+            cx_txt = (w - cw) // 2
+            cy_txt = track_y + dot_r + max(10, bar_h // 10)
+
+            cv2.putText(frame, coord_txt,
+                        (cx_txt + 1, cy_txt + 1), font, c_scale,
+                        (0, 0, 0), c_thick + 1, cv2.LINE_AA)
+            cv2.putText(frame, coord_txt,
+                        (cx_txt, cy_txt), font, c_scale,
+                        (180, 230, 180), c_thick, cv2.LINE_AA)   # soft green
+        except Exception:
+            pass   # never crash the render loop over coord display
 
     def _render_frame(self, base_settings: QgsMapSettings,
                       cx: float, cy: float, bearing: float):

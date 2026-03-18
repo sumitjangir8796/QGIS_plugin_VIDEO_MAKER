@@ -709,6 +709,7 @@ class CorridorVideoMakerDialog(QDialog):
             total_distance_m=total_distance_m,
             start_label=start_label,
             end_label=end_label,
+            layer_crs=layer_crs,
             split_enabled=split_enabled,
             left_layer_ids=left_layer_ids,
             right_layer_ids=right_layer_ids,
