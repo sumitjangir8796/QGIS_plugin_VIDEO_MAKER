@@ -483,22 +483,25 @@ class VideoExporter(QObject):
     def _draw_terrain_profile(self, frame, cx, cy, bearing, cv2, np):
         """Sample a perpendicular DEM cross-section and draw it as an overlay.
 
-        The profile is centred on the current camera position and spans the
-        full corridor buffer width perpendicular to the travel direction.
-
-        Widget anchor: bottom-left of video frame, controlled by
-        ``_terrain_x_pct``/``_terrain_y_pct`` offsets (% of frame dims).
+        Improvements
+        ------------
+        * Y-axis ruler with cm-precision labels (e.g. 1523.45 m) and
+          horizontal grid lines at every tick.
+        * Current-camera elevation shown at the centre marker.
+        * Cross-section scan line drawn across the main video frame so the
+          viewer can see exactly which perpendicular slice is being profiled.
         """
         try:
             from qgis.core import QgsRaster, QgsPointXY as _QP
 
             h_frame, w_frame = frame.shape[:2]
+            font = cv2.FONT_HERSHEY_SIMPLEX
 
             # ── Widget rectangle in pixels ─────────────────────────────
-            wx      = int(self._terrain_x_pct  / 100.0 * w_frame)
-            ww      = max(40, int(self._terrain_w_pct / 100.0 * w_frame))
-            wh      = max(24, int(self._terrain_h_pct / 100.0 * h_frame))
-            wy_top  = h_frame - int(self._terrain_y_pct / 100.0 * h_frame) - wh
+            wx     = int(self._terrain_x_pct  / 100.0 * w_frame)
+            ww     = max(80, int(self._terrain_w_pct / 100.0 * w_frame))
+            wh     = max(40, int(self._terrain_h_pct / 100.0 * h_frame))
+            wy_top = h_frame - int(self._terrain_y_pct / 100.0 * h_frame) - wh
 
             if wy_top < 0:
                 wy_top = 2
@@ -510,13 +513,13 @@ class VideoExporter(QObject):
             dx = math.sin(perp_rad)
             dy = math.cos(perp_rad)
 
-            N         = max(60, ww)          # samples  ≈  pixels wide
-            half_buf  = self._buffer         # map units, centre → edge
-            provider  = self._terrain_layer.dataProvider()
+            N        = max(80, ww)          # samples ≈ pixels wide
+            half_buf = self._buffer         # map units, centre → edge
+            provider = self._terrain_layer.dataProvider()
             elevations = []
 
             for i in range(N):
-                t  = (i / (N - 1)) * 2.0 - 1.0   # –1 … +1
+                t  = (i / (N - 1)) * 2.0 - 1.0   # −1 … +1
                 pt = _QP(cx + dx * t * half_buf,
                          cy + dy * t * half_buf)
                 if self._terrain_transform is not None:
@@ -539,8 +542,35 @@ class VideoExporter(QObject):
 
             elev_min = min(valid)
             elev_max = max(valid)
-            if elev_max <= elev_min:
-                elev_max = elev_min + 1.0
+            if elev_max - elev_min < 0.01:
+                elev_max = elev_min + 0.01
+
+            # ── Scan line on main map view ─────────────────────────────
+            # Because bearing points UP on screen, the perpendicular transect
+            # is always a horizontal line at the vertical centre of the frame.
+            mid_y      = h_frame // 2
+            lyr_name   = self._terrain_layer.name()
+            scan_col   = self._terrain_marker_color
+
+            # dashed horizontal line across full frame width
+            x_cur = 0
+            dash_len, gap_len = 14, 6
+            while x_cur < w_frame:
+                x_end = min(x_cur + dash_len, w_frame)
+                cv2.line(frame, (x_cur, mid_y), (x_end, mid_y),
+                         scan_col, 1, cv2.LINE_AA)
+                x_cur += dash_len + gap_len
+
+            # Left / right distance tags + layer name centred on the line
+            fscl_map = max(0.28, h_frame / 2160.0)
+            scan_lbl  = f"\u2190 {half_buf:.0f} m   {lyr_name}   {half_buf:.0f} m \u2192"
+            (slw, slh), _ = cv2.getTextSize(scan_lbl, font, fscl_map, 1)
+            slx = (w_frame - slw) // 2
+            sly = mid_y - 4
+            cv2.putText(frame, scan_lbl, (slx + 1, sly + 1), font,
+                        fscl_map, (0, 0, 0), 2, cv2.LINE_AA)
+            cv2.putText(frame, scan_lbl, (slx, sly), font,
+                        fscl_map, scan_col, 1, cv2.LINE_AA)
 
             # ── Background (alpha-blended) ─────────────────────────────
             overlay = frame.copy()
@@ -550,38 +580,86 @@ class VideoExporter(QObject):
             a = float(self._terrain_bg_alpha)
             cv2.addWeighted(overlay, a, frame, 1.0 - a, 0, frame)
 
-            # ── Profile polygon ────────────────────────────────────────
-            lbl_room = 14 if self._terrain_show_labels else 0
-            pad      = 4
-            inner_w  = ww - 2 * pad
-            inner_h  = wh - 2 * pad - lbl_room
-            base_y   = wy_top + wh - pad
+            # ── Layout constants ───────────────────────────────────────
+            fscl  = max(0.28, wh / 210.0)
+            ftck  = 1
+            lc    = (200, 200, 200)
 
+            # Measure Y-axis label width with cm precision: e.g. "1523.45"
+            sample_lbl = f"{elev_max:.2f}"
+            (lw_yax, lh_yax), _ = cv2.getTextSize(sample_lbl, font, fscl, ftck)
+            y_axis_w = lw_yax + 8   # left margin for Y-axis labels + tick
+
+            title_h = lh_yax + 4 if self._terrain_show_labels else 0
+            pad     = 4
+
+            inner_x0 = wx + y_axis_w
+            inner_x1 = wx + ww - pad
+            inner_y0 = wy_top + title_h + pad
+            inner_y1 = wy_top + wh - pad
+            inner_w  = max(1, inner_x1 - inner_x0)
+            inner_h  = max(1, inner_y1 - inner_y0)
+            base_y   = inner_y1
+
+            # ── Y-axis ticks, grid lines & cm-precision labels ─────────
+            N_TICKS   = 4
+            grid_col  = (55, 55, 55)
+
+            for ti in range(N_TICKS + 1):
+                frac  = ti / float(N_TICKS)
+                e_val = elev_min + frac * (elev_max - elev_min)
+                ty    = inner_y1 - int(frac * inner_h)
+
+                # horizontal grid line across profile area
+                cv2.line(frame, (inner_x0, ty), (inner_x1, ty),
+                         grid_col, 1)
+
+                # tick on the Y-axis rule line
+                cv2.line(frame,
+                         (inner_x0 - 3, ty), (inner_x0, ty),
+                         lc, 1)
+
+                if self._terrain_show_labels:
+                    # label with cm precision (2 decimal places)
+                    lbl = f"{e_val:.2f}"
+                    (lw, lh), _ = cv2.getTextSize(lbl, font, fscl, ftck)
+                    lx = wx + y_axis_w - lw - 6
+                    ly = ty + lh // 2
+                    # keep inside widget bounds
+                    ly = max(wy_top + lh + 2,
+                             min(ly, wy_top + wh - 2))
+                    cv2.putText(frame, lbl, (lx, ly), font,
+                                fscl, lc, ftck, cv2.LINE_AA)
+
+            # Y-axis rule line
+            cv2.line(frame,
+                     (inner_x0, inner_y0), (inner_x0, inner_y1),
+                     lc, 1)
+
+            # ── Profile polygon ────────────────────────────────────────
             profile_pts = []
             for i, e in enumerate(elevations):
-                sx = wx + pad + int(i / (N - 1) * inner_w)
+                sx = inner_x0 + int(i / (N - 1) * inner_w)
                 if e is not None:
                     norm = (e - elev_min) / (elev_max - elev_min)
-                    sy   = wy_top + lbl_room + pad + int((1.0 - norm) * inner_h)
+                    sy   = inner_y1 - int(norm * inner_h)
                 else:
                     sy = base_y
                 profile_pts.append((sx, sy))
 
-            # Filled area
-            fill_poly = profile_pts + [(wx + ww - pad, base_y), (wx + pad, base_y)]
+            fill_poly = (profile_pts
+                         + [(inner_x1, base_y), (inner_x0, base_y)])
             cv2.fillPoly(frame,
                          [np.array(fill_poly, dtype=np.int32)],
                          self._terrain_fill_color)
-            # Outline
             cv2.polylines(frame,
                           [np.array(profile_pts, dtype=np.int32)],
                           False, self._terrain_line_color, 2, cv2.LINE_AA)
 
             # ── Centre-line marker (current camera position) ───────────
-            cx_w = wx + ww // 2
+            cx_w = inner_x0 + inner_w // 2
             cv2.line(frame,
-                     (cx_w, wy_top + lbl_room + 2),
-                     (cx_w, wy_top + wh - 2),
+                     (cx_w, inner_y0), (cx_w, inner_y1),
                      self._terrain_marker_color, 1, cv2.LINE_AA)
 
             # ── Border ─────────────────────────────────────────────────
@@ -589,32 +667,47 @@ class VideoExporter(QObject):
                           (wx, wy_top), (wx + ww, wy_top + wh),
                           (130, 130, 130), 1)
 
-            # ── Elevation labels ───────────────────────────────────────
+            # ── Title + current elevation label ────────────────────────
             if self._terrain_show_labels:
-                font  = cv2.FONT_HERSHEY_SIMPLEX
-                fscl  = max(0.28, wh / 210.0)
-                ftck  = 1
-                lc    = (200, 200, 200)   # label colour
-
-                # Title centred at top of widget
-                title = "Cross-Section"
+                # Title
+                title = "Cross-Section Profile"
                 (ttw, tth), _ = cv2.getTextSize(title, font, fscl, ftck)
                 cv2.putText(frame, title,
-                            (wx + (ww - ttw) // 2, wy_top + tth + 2),
+                            (inner_x0 + (inner_w - ttw) // 2,
+                             wy_top + tth + 2),
                             font, fscl, (160, 160, 160), ftck, cv2.LINE_AA)
 
-                # Max elev – top-right
-                txt_hi = f"{elev_max:.0f} m"
-                (tw, _), _ = cv2.getTextSize(txt_hi, font, fscl, ftck)
-                cv2.putText(frame, txt_hi,
-                            (wx + ww - tw - pad, wy_top + tth + 2),
-                            font, fscl, lc, ftck, cv2.LINE_AA)
+                # Elevation at camera (centre of transect) with cm precision
+                mid_idx = N // 2
+                mid_e   = None
+                for k in range(mid_idx, N):       # search right from centre
+                    if k < len(elevations) and elevations[k] is not None:
+                        mid_e = elevations[k]
+                        break
+                if mid_e is None:
+                    for k in range(mid_idx - 1, -1, -1):   # then left
+                        if k < len(elevations) and elevations[k] is not None:
+                            mid_e = elevations[k]
+                            break
 
-                # Min elev – bottom-right
-                txt_lo = f"{elev_min:.0f} m"
-                cv2.putText(frame, txt_lo,
-                            (wx + ww - tw - pad, wy_top + wh - pad),
-                            font, fscl, lc, ftck, cv2.LINE_AA)
+                if mid_e is not None:
+                    cur_lbl = f"{mid_e:.2f} m"
+                    (clw, clh), _ = cv2.getTextSize(cur_lbl, font, fscl, ftck)
+                    clx = cx_w - clw // 2
+                    cly = inner_y0 + clh + 2
+                    cv2.putText(frame, cur_lbl, (clx + 1, cly + 1), font,
+                                fscl, (0, 0, 0), ftck + 1, cv2.LINE_AA)
+                    cv2.putText(frame, cur_lbl, (clx, cly), font,
+                                fscl, self._terrain_marker_color,
+                                ftck, cv2.LINE_AA)
+
+                # "m" unit hint at top of Y-axis
+                unit_lbl = "(m)"
+                (uw, uh), _ = cv2.getTextSize(unit_lbl, font, fscl * 0.85, ftck)
+                cv2.putText(frame, unit_lbl,
+                            (wx + 2, inner_y0 - 2),
+                            font, fscl * 0.85,
+                            (140, 140, 140), ftck, cv2.LINE_AA)
 
         except Exception:
             pass   # never crash the render loop over terrain profile
