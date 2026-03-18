@@ -628,7 +628,7 @@ class VideoExporter(QObject):
             cv2.line(frame, (inner_x0, inner_y0), (inner_x0, inner_y1), lc, 1)
 
             # ── Draw each surface model's profile ──────────────────────
-            for elevs, line_col, fill_col, _lbl in all_profiles:
+            for elevs, line_col, _fill_col, _lbl in all_profiles:
                 profile_pts = []
                 for i, e in enumerate(elevs):
                     sx = inner_x0 + int(i / (N - 1) * inner_w)
@@ -639,15 +639,6 @@ class VideoExporter(QObject):
                         sy = base_y
                     profile_pts.append((sx, sy))
 
-                fill_poly = (profile_pts
-                             + [(inner_x1, base_y), (inner_x0, base_y)])
-
-                # Semi-transparent fill
-                fill_overlay = frame.copy()
-                cv2.fillPoly(fill_overlay,
-                             [np.array(fill_poly, dtype=np.int32)],
-                             fill_col)
-                cv2.addWeighted(fill_overlay, 0.55, frame, 0.45, 0, frame)
 
                 # Solid outline
                 cv2.polylines(frame,
