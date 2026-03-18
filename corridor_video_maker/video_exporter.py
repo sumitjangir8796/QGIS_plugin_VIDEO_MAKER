@@ -343,9 +343,15 @@ class VideoExporter(QObject):
             else:
                 lat, lon = cy, cx   # already geographic
 
-            lat_ch = 'N' if lat >= 0 else 'S'
-            lon_ch = 'E' if lon >= 0 else 'W'
-            coord_txt = f"{abs(lat):.6f}{chr(176)}{lat_ch}   {abs(lon):.6f}{chr(176)}{lon_ch}"
+            def _to_dms(value, pos_ch, neg_ch):
+                ch  = pos_ch if value >= 0 else neg_ch
+                v   = abs(value)
+                d   = int(v)
+                m   = int((v - d) * 60)
+                s   = (v - d - m / 60.0) * 3600.0
+                return f"{d}d {m}m {s:.2f}s {ch}"
+
+            coord_txt = f"Lat: {_to_dms(lat, 'N', 'S')}    Lon: {_to_dms(lon, 'E', 'W')}"
 
             c_scale = max(0.38, bar_h / 170.0)
             c_thick = max(1, int(c_scale * 1.5))
