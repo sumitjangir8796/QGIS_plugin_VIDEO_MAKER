@@ -12,7 +12,7 @@ Usage (called from the dialog)
         canvas          = iface.mapCanvas(),
         corridor_points = [(x, y, bearing), ...],      # from utils.py
         buffer_map_units= 150,                          # half-width of view
-        video_path      = r"C:\out\corridor.mp4",
+        video_path      = r"C:\\out\\corridor.mp4",
         fps             = 25,
         video_width     = 1920,
         video_height    = 1080,
@@ -76,6 +76,19 @@ class VideoExporter(QObject):
                  div_width=3,            # pixel width of divider line
                  left_panel_label='',    # text drawn in upper-left of left panel
                  right_panel_label='',   # text drawn in upper-left of right panel
+                 # ── terrain profile options ───────────────────────────
+                 terrain_enabled=False,
+                 terrain_layer_id=None,  # QGIS layer ID of the DEM raster
+                 terrain_x_pct=5,        # widget left edge   (% of frame width)
+                 terrain_y_pct=5,        # widget bottom edge (% of frame height)
+                 terrain_w_pct=28,       # widget width  (% of frame width)
+                 terrain_h_pct=18,       # widget height (% of frame height)
+                 terrain_bg_color=(20, 20, 20),     # BGR background
+                 terrain_bg_alpha=0.72,             # background opacity 0-1
+                 terrain_fill_color=(30, 100, 20),  # BGR polygon fill
+                 terrain_line_color=(30, 220, 30),  # BGR outline
+                 terrain_marker_color=(0, 220, 220),# BGR centre-line tick
+                 terrain_show_labels=True,          # draw min/max elevation
                  parent=None):
         super().__init__(parent)
         self._canvas = canvas
@@ -108,6 +121,35 @@ class VideoExporter(QObject):
         self._div_width        = div_width
         self._left_panel_label = left_panel_label
         self._right_panel_label= right_panel_label
+
+        # ── Terrain profile ──────────────────────────────────────────────
+        self._terrain_enabled       = terrain_enabled
+        self._terrain_x_pct         = terrain_x_pct
+        self._terrain_y_pct         = terrain_y_pct
+        self._terrain_w_pct         = terrain_w_pct
+        self._terrain_h_pct         = terrain_h_pct
+        self._terrain_bg_color      = terrain_bg_color
+        self._terrain_bg_alpha      = terrain_bg_alpha
+        self._terrain_fill_color    = terrain_fill_color
+        self._terrain_line_color    = terrain_line_color
+        self._terrain_marker_color  = terrain_marker_color
+        self._terrain_show_labels   = terrain_show_labels
+        self._terrain_layer         = None
+        self._terrain_transform     = None
+
+        if terrain_enabled and terrain_layer_id:
+            self._terrain_layer = QgsProject.instance().mapLayer(terrain_layer_id)
+            if self._terrain_layer is not None:
+                raster_crs = self._terrain_layer.crs()
+                if (raster_crs.isValid() and src_crs.isValid()
+                        and raster_crs.authid() != src_crs.authid()):
+                    try:
+                        self._terrain_transform = QgsCoordinateTransform(
+                            src_crs, raster_crs, QgsProject.instance()
+                        )
+                    except Exception:
+                        self._terrain_transform = None
+
         self._abort = False
 
     # ------------------------------------------------------------------
@@ -197,6 +239,10 @@ class VideoExporter(QObject):
                     cx, cy,
                     cv2, np
                 )
+
+            # Draw terrain cross-section profile overlay
+            if self._terrain_enabled and self._terrain_layer is not None:
+                self._draw_terrain_profile(frame_bgr, cx, cy, bearing, cv2, np)
 
             writer.write(frame_bgr)
             pct = int((idx + 1) / total * 100)
@@ -432,6 +478,146 @@ class VideoExporter(QObject):
                          c_scale, (0, 0, 0), c_thick + 1, _cv2.LINE_AA)
             _cv2.putText(frame, fallback, (tx, y), font,
                          c_scale, color_bgr, c_thick, _cv2.LINE_AA)
+
+    # ------------------------------------------------------------------
+    def _draw_terrain_profile(self, frame, cx, cy, bearing, cv2, np):
+        """Sample a perpendicular DEM cross-section and draw it as an overlay.
+
+        The profile is centred on the current camera position and spans the
+        full corridor buffer width perpendicular to the travel direction.
+
+        Widget anchor: bottom-left of video frame, controlled by
+        ``_terrain_x_pct``/``_terrain_y_pct`` offsets (% of frame dims).
+        """
+        try:
+            from qgis.core import QgsRaster, QgsPointXY as _QP
+
+            h_frame, w_frame = frame.shape[:2]
+
+            # ── Widget rectangle in pixels ─────────────────────────────
+            wx      = int(self._terrain_x_pct  / 100.0 * w_frame)
+            ww      = max(40, int(self._terrain_w_pct / 100.0 * w_frame))
+            wh      = max(24, int(self._terrain_h_pct / 100.0 * h_frame))
+            wy_top  = h_frame - int(self._terrain_y_pct / 100.0 * h_frame) - wh
+
+            if wy_top < 0:
+                wy_top = 2
+            if wx + ww > w_frame:
+                ww = w_frame - wx - 2
+
+            # ── Sample perpendicular transect ──────────────────────────
+            perp_rad = math.radians(bearing + 90.0)
+            dx = math.sin(perp_rad)
+            dy = math.cos(perp_rad)
+
+            N         = max(60, ww)          # samples  ≈  pixels wide
+            half_buf  = self._buffer         # map units, centre → edge
+            provider  = self._terrain_layer.dataProvider()
+            elevations = []
+
+            for i in range(N):
+                t  = (i / (N - 1)) * 2.0 - 1.0   # –1 … +1
+                pt = _QP(cx + dx * t * half_buf,
+                         cy + dy * t * half_buf)
+                if self._terrain_transform is not None:
+                    try:
+                        pt = self._terrain_transform.transform(pt)
+                    except Exception:
+                        elevations.append(None)
+                        continue
+                res = provider.identify(pt, QgsRaster.IdentifyFormatValue)
+                val = None
+                if res.isValid():
+                    v = res.results().get(1, None)
+                    if v is not None and v == v:   # reject NaN
+                        val = float(v)
+                elevations.append(val)
+
+            valid = [e for e in elevations if e is not None]
+            if len(valid) < 2:
+                return
+
+            elev_min = min(valid)
+            elev_max = max(valid)
+            if elev_max <= elev_min:
+                elev_max = elev_min + 1.0
+
+            # ── Background (alpha-blended) ─────────────────────────────
+            overlay = frame.copy()
+            cv2.rectangle(overlay,
+                          (wx, wy_top), (wx + ww, wy_top + wh),
+                          self._terrain_bg_color, -1)
+            a = float(self._terrain_bg_alpha)
+            cv2.addWeighted(overlay, a, frame, 1.0 - a, 0, frame)
+
+            # ── Profile polygon ────────────────────────────────────────
+            lbl_room = 14 if self._terrain_show_labels else 0
+            pad      = 4
+            inner_w  = ww - 2 * pad
+            inner_h  = wh - 2 * pad - lbl_room
+            base_y   = wy_top + wh - pad
+
+            profile_pts = []
+            for i, e in enumerate(elevations):
+                sx = wx + pad + int(i / (N - 1) * inner_w)
+                if e is not None:
+                    norm = (e - elev_min) / (elev_max - elev_min)
+                    sy   = wy_top + lbl_room + pad + int((1.0 - norm) * inner_h)
+                else:
+                    sy = base_y
+                profile_pts.append((sx, sy))
+
+            # Filled area
+            fill_poly = profile_pts + [(wx + ww - pad, base_y), (wx + pad, base_y)]
+            cv2.fillPoly(frame,
+                         [np.array(fill_poly, dtype=np.int32)],
+                         self._terrain_fill_color)
+            # Outline
+            cv2.polylines(frame,
+                          [np.array(profile_pts, dtype=np.int32)],
+                          False, self._terrain_line_color, 2, cv2.LINE_AA)
+
+            # ── Centre-line marker (current camera position) ───────────
+            cx_w = wx + ww // 2
+            cv2.line(frame,
+                     (cx_w, wy_top + lbl_room + 2),
+                     (cx_w, wy_top + wh - 2),
+                     self._terrain_marker_color, 1, cv2.LINE_AA)
+
+            # ── Border ─────────────────────────────────────────────────
+            cv2.rectangle(frame,
+                          (wx, wy_top), (wx + ww, wy_top + wh),
+                          (130, 130, 130), 1)
+
+            # ── Elevation labels ───────────────────────────────────────
+            if self._terrain_show_labels:
+                font  = cv2.FONT_HERSHEY_SIMPLEX
+                fscl  = max(0.28, wh / 210.0)
+                ftck  = 1
+                lc    = (200, 200, 200)   # label colour
+
+                # Title centred at top of widget
+                title = "Cross-Section"
+                (ttw, tth), _ = cv2.getTextSize(title, font, fscl, ftck)
+                cv2.putText(frame, title,
+                            (wx + (ww - ttw) // 2, wy_top + tth + 2),
+                            font, fscl, (160, 160, 160), ftck, cv2.LINE_AA)
+
+                # Max elev – top-right
+                txt_hi = f"{elev_max:.0f} m"
+                (tw, _), _ = cv2.getTextSize(txt_hi, font, fscl, ftck)
+                cv2.putText(frame, txt_hi,
+                            (wx + ww - tw - pad, wy_top + tth + 2),
+                            font, fscl, lc, ftck, cv2.LINE_AA)
+
+                # Min elev – bottom-right
+                txt_lo = f"{elev_min:.0f} m"
+                cv2.putText(frame, txt_lo,
+                            (wx + ww - tw - pad, wy_top + wh - pad),
+                            font, fscl, lc, ftck, cv2.LINE_AA)
+
+        except Exception:
+            pass   # never crash the render loop over terrain profile
 
     def _render_frame(self, base_settings: QgsMapSettings,
                       cx: float, cy: float, bearing: float):

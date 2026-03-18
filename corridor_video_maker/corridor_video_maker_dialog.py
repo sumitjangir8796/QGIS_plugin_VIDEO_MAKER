@@ -2,7 +2,7 @@
 """
 Dialog for Corridor Video Maker.
 
-Provides the full UI split across two tabs:
+Provides the full UI split across four tabs:
 
 Tab 1 - Standard
     * Centerline layer selector
@@ -19,6 +19,15 @@ Tab 2 - Advanced Frame Designer
     * Two mirrored layer-tree pickers (Left panel / Right panel)
       with check-boxes for every layer and group in the project
     * Refresh button to re-scan layers after project changes
+
+Tab 3 - Terrain Profile
+    * Enable / disable cross-section overlay (default OFF)
+    * DEM raster layer selector
+    * Widget position & size (% of frame)
+    * Visual style: background colour, profile fill, outline, marker
+    * Elevation labels toggle
+
+Tab 4 - Help & About
 """
 
 import os
@@ -59,6 +68,34 @@ _DIV_COLOURS = {
     "Yellow":     (0,   255, 255),
     "Red":        (0,   0,   255),
     "None":       None,
+}
+
+# ---------------------------------------------------------------------------
+# Colour / style presets for the terrain profile overlay  (BGR for OpenCV)
+# ---------------------------------------------------------------------------
+_TERRAIN_BG_COLOURS = {
+    "Dark (semi-transparent)": (20,  20,  20),
+    "Black":                   (0,   0,   0),
+    "Dark Blue":               (60,  20,  0),
+    "Dark Brown":              (10,  30,  60),
+    "White":                   (255, 255, 255),
+}
+_TERRAIN_BG_ALPHAS = {
+    "Dark (semi-transparent)": 0.72,
+    "Black":                   0.88,
+    "Dark Blue":               0.82,
+    "Dark Brown":              0.82,
+    "White":                   0.70,
+}
+_TERRAIN_PROFILE_COLOURS = {
+    "Dark Green":   (30,  100, 20),
+    "Bright Green": (30,  220, 30),
+    "Yellow":       (0,   220, 220),
+    "Cyan":         (200, 200, 0),
+    "White":        (255, 255, 255),
+    "Orange":       (0,   140, 255),
+    "Red":          (0,   40,  200),
+    "Blue":         (200, 80,  20),
 }
 
 
@@ -134,7 +171,16 @@ class CorridorVideoMakerDialog(QDialog):
         self._build_advanced_tab(adv_widget)
         self._tabs.addTab(adv_scroll, "Advanced - Frame Designer")
 
-        # Tab 3: Help & About
+        # Tab 3: Terrain Profile
+        terrain_scroll = QScrollArea()
+        terrain_scroll.setWidgetResizable(True)
+        terrain_scroll.setFrameShape(QFrame.NoFrame)
+        terrain_widget = QWidget()
+        terrain_scroll.setWidget(terrain_widget)
+        self._build_terrain_tab(terrain_widget)
+        self._tabs.addTab(terrain_scroll, "Terrain Profile")
+
+        # Tab 4: Help & About
         help_widget = QWidget()
         self._build_help_tab(help_widget)
         self._tabs.addTab(help_widget, "Help & About")
@@ -444,7 +490,144 @@ class CorridorVideoMakerDialog(QDialog):
         layout.addWidget(grp_split, 1)
 
     # ------------------------------------------------------------------
-    # Tab 3: Help & About
+    # Tab 3: Terrain Profile
+    # ------------------------------------------------------------------
+
+    def _build_terrain_tab(self, widget):
+        """Build the Terrain Profile overlay tab."""
+        layout = QVBoxLayout(widget)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(10)
+
+        info = QLabel(
+            "<b>Terrain Profile</b>  – overlay a live cross-section of the surface "
+            "model perpendicular to the travel direction, centred on the camera position."
+        )
+        info.setWordWrap(True)
+        info.setTextFormat(Qt.RichText)
+        layout.addWidget(info)
+
+        # Master enable
+        self.chk_terrain = QCheckBox(
+            "Enable terrain profile overlay       (default: OFF)"
+        )
+        self.chk_terrain.setChecked(False)
+        self.chk_terrain.toggled.connect(self._on_terrain_toggled)
+        layout.addWidget(self.chk_terrain)
+
+        # ----------------------------------------------------------------
+        # Container shown/enabled only when the checkbox is on
+        # ----------------------------------------------------------------
+        self._terrain_designer = QWidget()
+        self._terrain_designer.setEnabled(False)
+        layout.addWidget(self._terrain_designer)
+
+        td = QVBoxLayout(self._terrain_designer)
+        td.setContentsMargins(0, 4, 0, 0)
+        td.setSpacing(10)
+
+        # --- 1. Raster layer -----------------------------------------
+        grp_raster = QGroupBox("1.  Surface Model  (DEM / elevation raster layer)")
+        r_lay = QVBoxLayout(grp_raster)
+        r_hint = QLabel(
+            "Select the single-band elevation raster that covers your corridor area."
+        )
+        r_hint.setWordWrap(True)
+        r_hint.setStyleSheet("color: grey; font-size: 10px;")
+        r_lay.addWidget(r_hint)
+        self.cb_terrain_layer = QgsMapLayerComboBox()
+        self.cb_terrain_layer.setFilters(QgsMapLayerProxyModel.RasterLayer)
+        self.cb_terrain_layer.setAllowEmptyLayer(True)
+        self.cb_terrain_layer.setToolTip(
+            "DEM raster used to sample elevation along the perpendicular cross-section."
+        )
+        r_lay.addWidget(self.cb_terrain_layer)
+        td.addWidget(grp_raster)
+
+        # --- 2. Widget position & size --------------------------------
+        grp_pos = QGroupBox("2.  Widget Position & Size  (% of video frame)")
+        g_pos = QGridLayout(grp_pos)
+        g_pos.setSpacing(6)
+
+        g_pos.addWidget(QLabel("X offset  (from left edge):"), 0, 0)
+        self.sb_terrain_x = QSpinBox()
+        self.sb_terrain_x.setRange(0, 90)
+        self.sb_terrain_x.setValue(5)
+        self.sb_terrain_x.setSuffix(" %")
+        self.sb_terrain_x.setToolTip("Horizontal distance from the left edge of the video (%).")
+        g_pos.addWidget(self.sb_terrain_x, 0, 1)
+
+        g_pos.addWidget(QLabel("Y offset  (from bottom edge):"), 1, 0)
+        self.sb_terrain_y = QSpinBox()
+        self.sb_terrain_y.setRange(0, 90)
+        self.sb_terrain_y.setValue(5)
+        self.sb_terrain_y.setSuffix(" %")
+        self.sb_terrain_y.setToolTip("Vertical distance from the bottom edge of the video (%).")
+        g_pos.addWidget(self.sb_terrain_y, 1, 1)
+
+        g_pos.addWidget(QLabel("Widget width:"), 2, 0)
+        self.sb_terrain_w = QSpinBox()
+        self.sb_terrain_w.setRange(5, 80)
+        self.sb_terrain_w.setValue(28)
+        self.sb_terrain_w.setSuffix(" %")
+        self.sb_terrain_w.setToolTip("Width of the profile widget as % of video frame width.")
+        g_pos.addWidget(self.sb_terrain_w, 2, 1)
+
+        g_pos.addWidget(QLabel("Widget height:"), 3, 0)
+        self.sb_terrain_h = QSpinBox()
+        self.sb_terrain_h.setRange(5, 50)
+        self.sb_terrain_h.setValue(18)
+        self.sb_terrain_h.setSuffix(" %")
+        self.sb_terrain_h.setToolTip("Height of the profile widget as % of video frame height.")
+        g_pos.addWidget(self.sb_terrain_h, 3, 1)
+
+        td.addWidget(grp_pos)
+
+        # --- 3. Visual style -----------------------------------------
+        grp_style = QGroupBox("3.  Visual Style")
+        g_sty = QGridLayout(grp_style)
+        g_sty.setSpacing(6)
+
+        g_sty.addWidget(QLabel("Background colour:"), 0, 0)
+        self.cb_terrain_bg = QComboBox()
+        for name in _TERRAIN_BG_COLOURS:
+            self.cb_terrain_bg.addItem(name)
+        self.cb_terrain_bg.setCurrentText("Dark (semi-transparent)")
+        g_sty.addWidget(self.cb_terrain_bg, 0, 1)
+
+        g_sty.addWidget(QLabel("Profile fill colour:"), 1, 0)
+        self.cb_terrain_fill = QComboBox()
+        for name in _TERRAIN_PROFILE_COLOURS:
+            self.cb_terrain_fill.addItem(name)
+        self.cb_terrain_fill.setCurrentText("Dark Green")
+        g_sty.addWidget(self.cb_terrain_fill, 1, 1)
+
+        g_sty.addWidget(QLabel("Profile line colour:"), 2, 0)
+        self.cb_terrain_line = QComboBox()
+        for name in _TERRAIN_PROFILE_COLOURS:
+            self.cb_terrain_line.addItem(name)
+        self.cb_terrain_line.setCurrentText("Bright Green")
+        g_sty.addWidget(self.cb_terrain_line, 2, 1)
+
+        g_sty.addWidget(QLabel("Centre-line marker:"), 3, 0)
+        self.cb_terrain_marker = QComboBox()
+        for name in _TERRAIN_PROFILE_COLOURS:
+            self.cb_terrain_marker.addItem(name)
+        self.cb_terrain_marker.setCurrentText("Yellow")
+        g_sty.addWidget(self.cb_terrain_marker, 3, 1)
+
+        self.chk_terrain_labels = QCheckBox(
+            "Show min / max elevation labels on the profile widget"
+        )
+        self.chk_terrain_labels.setChecked(True)
+        g_sty.addWidget(self.chk_terrain_labels, 4, 0, 1, 2)
+
+        td.addWidget(grp_style)
+        td.addStretch(1)
+        layout.addStretch(1)
+
+    # ------------------------------------------------------------------
+    # Tab 4: Help & About
     # ------------------------------------------------------------------
 
     def _build_help_tab(self, widget):
@@ -603,6 +786,10 @@ class CorridorVideoMakerDialog(QDialog):
         if checked and self.tree_left.topLevelItemCount() == 0:
             self._populate_split_trees()
 
+    @pyqtSlot(bool)
+    def _on_terrain_toggled(self, checked: bool):
+        self._terrain_designer.setEnabled(checked)
+
     @pyqtSlot(int)
     def _on_ratio_changed(self, value: int):
         self.lbl_ratio.setText(f"{value} %  |  {100 - value} %")
@@ -697,6 +884,44 @@ class CorridorVideoMakerDialog(QDialog):
                     self.lbl_status.setText("")
                     return
 
+        # Terrain profile settings
+        terrain_enabled      = self.chk_terrain.isChecked()
+        terrain_layer_id     = None
+        terrain_x_pct        = self.sb_terrain_x.value()
+        terrain_y_pct        = self.sb_terrain_y.value()
+        terrain_w_pct        = self.sb_terrain_w.value()
+        terrain_h_pct        = self.sb_terrain_h.value()
+        terrain_bg_color     = (20, 20, 20)
+        terrain_bg_alpha     = 0.72
+        terrain_fill_color   = (30, 100, 20)
+        terrain_line_color   = (30, 220, 30)
+        terrain_marker_color = (0, 220, 220)
+        terrain_show_labels  = True
+
+        if terrain_enabled:
+            raster_lyr = self.cb_terrain_layer.currentLayer()
+            if raster_lyr is None:
+                QMessageBox.warning(
+                    self, "Terrain Profile – No Raster Selected",
+                    "Terrain profile is enabled but no raster layer is selected.\n"
+                    "Please select a DEM layer on the Terrain Profile tab, "
+                    "or disable the profile overlay."
+                )
+                self.lbl_status.setText("")
+                return
+            terrain_layer_id     = raster_lyr.id()
+            terrain_bg_color     = _TERRAIN_BG_COLOURS.get(
+                self.cb_terrain_bg.currentText(), (20, 20, 20))
+            terrain_bg_alpha     = _TERRAIN_BG_ALPHAS.get(
+                self.cb_terrain_bg.currentText(), 0.72)
+            terrain_fill_color   = _TERRAIN_PROFILE_COLOURS.get(
+                self.cb_terrain_fill.currentText(), (30, 100, 20))
+            terrain_line_color   = _TERRAIN_PROFILE_COLOURS.get(
+                self.cb_terrain_line.currentText(), (30, 220, 30))
+            terrain_marker_color = _TERRAIN_PROFILE_COLOURS.get(
+                self.cb_terrain_marker.currentText(), (0, 220, 220))
+            terrain_show_labels  = self.chk_terrain_labels.isChecked()
+
         # Create exporter
         self._exporter = VideoExporter(
             canvas=self.canvas,
@@ -718,6 +943,19 @@ class CorridorVideoMakerDialog(QDialog):
             div_width=div_width,
             left_panel_label=left_panel_label,
             right_panel_label=right_panel_label,
+            # terrain profile
+            terrain_enabled=terrain_enabled,
+            terrain_layer_id=terrain_layer_id,
+            terrain_x_pct=terrain_x_pct,
+            terrain_y_pct=terrain_y_pct,
+            terrain_w_pct=terrain_w_pct,
+            terrain_h_pct=terrain_h_pct,
+            terrain_bg_color=terrain_bg_color,
+            terrain_bg_alpha=terrain_bg_alpha,
+            terrain_fill_color=terrain_fill_color,
+            terrain_line_color=terrain_line_color,
+            terrain_marker_color=terrain_marker_color,
+            terrain_show_labels=terrain_show_labels,
         )
         self._exporter.progressChanged.connect(self._on_progress)
         self._exporter.finished.connect(self._on_finished)
