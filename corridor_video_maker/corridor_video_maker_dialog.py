@@ -33,7 +33,7 @@ Tab 4 - Help & About
 import os
 
 from qgis.PyQt.QtCore import Qt, QThread, pyqtSlot
-from qgis.PyQt.QtGui import QColor
+from qgis.PyQt.QtGui import QColor, QPalette
 from qgis.PyQt.QtWidgets import (
     QDialog, QVBoxLayout, QHBoxLayout, QGridLayout,
     QGroupBox, QLabel, QComboBox, QPushButton, QLineEdit,
@@ -886,41 +886,47 @@ class CorridorVideoMakerDialog(QDialog):
 
         # Terrain profile settings
         terrain_enabled      = self.chk_terrain.isChecked()
-        terrain_layer_id     = None
+        terrain_layers_cfg   = []   # list of dicts passed to VideoExporter
         terrain_x_pct        = self.sb_terrain_x.value()
         terrain_y_pct        = self.sb_terrain_y.value()
         terrain_w_pct        = self.sb_terrain_w.value()
         terrain_h_pct        = self.sb_terrain_h.value()
         terrain_bg_color     = (20, 20, 20)
         terrain_bg_alpha     = 0.72
-        terrain_fill_color   = (30, 100, 20)
-        terrain_line_color   = (30, 220, 30)
         terrain_marker_color = (0, 220, 220)
         terrain_show_labels  = True
 
         if terrain_enabled:
-            raster_lyr = self.cb_terrain_layer.currentLayer()
-            if raster_lyr is None:
-                QMessageBox.warning(
-                    self, "Terrain Profile – No Raster Selected",
-                    "Terrain profile is enabled but no raster layer is selected.\n"
-                    "Please select a DEM layer on the Terrain Profile tab, "
-                    "or disable the profile overlay."
-                )
-                self.lbl_status.setText("")
-                return
-            terrain_layer_id     = raster_lyr.id()
             terrain_bg_color     = _TERRAIN_BG_COLOURS.get(
                 self.cb_terrain_bg.currentText(), (20, 20, 20))
             terrain_bg_alpha     = _TERRAIN_BG_ALPHAS.get(
                 self.cb_terrain_bg.currentText(), 0.72)
-            terrain_fill_color   = _TERRAIN_PROFILE_COLOURS.get(
-                self.cb_terrain_fill.currentText(), (30, 100, 20))
-            terrain_line_color   = _TERRAIN_PROFILE_COLOURS.get(
-                self.cb_terrain_line.currentText(), (30, 220, 30))
             terrain_marker_color = _TERRAIN_PROFILE_COLOURS.get(
                 self.cb_terrain_marker.currentText(), (0, 220, 220))
             terrain_show_labels  = self.chk_terrain_labels.isChecked()
+
+            for cb_lyr, le_lbl, cb_line, cb_fill, _row in self._terrain_rows:
+                lyr = cb_lyr.currentLayer()
+                if lyr is None:
+                    continue
+                terrain_layers_cfg.append({
+                    "layer_id":   lyr.id(),
+                    "label":      le_lbl.text().strip() or lyr.name(),
+                    "line_color": _TERRAIN_PROFILE_COLOURS.get(
+                                      cb_line.currentText(), (30, 220, 30)),
+                    "fill_color": _TERRAIN_PROFILE_COLOURS.get(
+                                      cb_fill.currentText(), (30, 100, 20)),
+                })
+
+            if not terrain_layers_cfg:
+                QMessageBox.warning(
+                    self, "Terrain Profile \u2013 No Raster Selected",
+                    "Terrain profile is enabled but no valid raster layer is selected.\n"
+                    "Please select a DEM layer in the Terrain Profile tab, "
+                    "or disable the profile overlay."
+                )
+                self.lbl_status.setText("")
+                return
 
         # Create exporter
         self._exporter = VideoExporter(
@@ -945,15 +951,13 @@ class CorridorVideoMakerDialog(QDialog):
             right_panel_label=right_panel_label,
             # terrain profile
             terrain_enabled=terrain_enabled,
-            terrain_layer_id=terrain_layer_id,
+            terrain_layers=terrain_layers_cfg,
             terrain_x_pct=terrain_x_pct,
             terrain_y_pct=terrain_y_pct,
             terrain_w_pct=terrain_w_pct,
             terrain_h_pct=terrain_h_pct,
             terrain_bg_color=terrain_bg_color,
             terrain_bg_alpha=terrain_bg_alpha,
-            terrain_fill_color=terrain_fill_color,
-            terrain_line_color=terrain_line_color,
             terrain_marker_color=terrain_marker_color,
             terrain_show_labels=terrain_show_labels,
         )
