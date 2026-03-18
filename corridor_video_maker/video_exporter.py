@@ -335,7 +335,7 @@ class VideoExporter(QObject):
         if end_label:
             _put_label(end_label, track_x1, align_right=True)
 
-        # ── Lat / Lon display ─────────────────────────────────────────────
+        # ── Lat / Lon display (PIL for Unicode ° symbol) ─────────────────
         try:
             if self._to_wgs84 is not None:
                 pt = self._to_wgs84.transform(QgsPointXY(cx, cy))
@@ -344,29 +344,94 @@ class VideoExporter(QObject):
                 lat, lon = cy, cx   # already geographic
 
             def _to_dms(value, pos_ch, neg_ch):
-                ch  = pos_ch if value >= 0 else neg_ch
-                v   = abs(value)
-                d   = int(v)
-                m   = int((v - d) * 60)
-                s   = (v - d - m / 60.0) * 3600.0
-                return f"{d}d {m:02d}' {s:05.2f}\" {ch}"
+                ch = pos_ch if value >= 0 else neg_ch
+                v  = abs(value)
+                d  = int(v)
+                m  = int((v - d) * 60)
+                s  = (v - d - m / 60.0) * 3600.0
+                return f"{d}\u00b0{m:02d}'{s:05.2f}\" {ch}"
 
             coord_txt = f"Lat: {_to_dms(lat, 'N', 'S')}    Lon: {_to_dms(lon, 'E', 'W')}"
 
-            c_scale = max(0.38, bar_h / 170.0)
-            c_thick = max(1, int(c_scale * 1.5))
-            (cw, ch2), _ = cv2.getTextSize(coord_txt, font, c_scale, c_thick)
-            cx_txt = (w - cw) // 2
+            font_size_px = max(14, int(bar_h * 0.22))
             cy_txt = track_y + dot_r + max(10, bar_h // 10)
 
-            cv2.putText(frame, coord_txt,
-                        (cx_txt + 1, cy_txt + 1), font, c_scale,
-                        (0, 0, 0), c_thick + 1, cv2.LINE_AA)
-            cv2.putText(frame, coord_txt,
-                        (cx_txt, cy_txt), font, c_scale,
-                        (180, 230, 180), c_thick, cv2.LINE_AA)   # soft green
+            self._put_unicode_text(frame, coord_txt,
+                                   cy_txt, font_size_px,
+                                   (180, 230, 180), np)
         except Exception:
             pass   # never crash the render loop over coord display
+
+    # ------------------------------------------------------------------
+    def _put_unicode_text(self, frame, text, y, font_size_px, color_bgr, np):
+        """Draw *text* (may contain Unicode like °) onto *frame* in-place.
+
+        Uses PIL/Pillow for full Unicode support.  Falls back to cv2 with
+        ASCII replacements (° → d) when PIL is unavailable.
+
+        Parameters
+        ----------
+        frame       : numpy BGR uint8 array  (modified in-place)
+        text        : str  — the string to render (may contain °, ′, ″ …)
+        y           : int  — baseline y coordinate in pixels
+        font_size_px: int  — approximate font height in pixels
+        color_bgr   : tuple (B, G, R) — text colour
+        np          : the numpy module reference from the caller
+        """
+        import cv2 as _cv2
+        try:
+            from PIL import Image, ImageDraw, ImageFont
+
+            h, w = frame.shape[:2]
+            color_rgb = (color_bgr[2], color_bgr[1], color_bgr[0])
+
+            # Convert the full frame to PIL (RGB)
+            pil_img = Image.fromarray(_cv2.cvtColor(frame, _cv2.COLOR_BGR2RGB))
+            draw = ImageDraw.Draw(pil_img)
+
+            # Load a system TTF that supports the degree glyph
+            font_loaded = None
+            for path in ("arial.ttf",
+                         "C:/Windows/Fonts/arial.ttf",
+                         "C:/Windows/Fonts/calibri.ttf",
+                         "C:/Windows/Fonts/segoeui.ttf"):
+                try:
+                    font_loaded = ImageFont.truetype(path, font_size_px)
+                    break
+                except Exception:
+                    continue
+            if font_loaded is None:
+                # PIL default bitmap font — very small, but always available
+                font_loaded = ImageFont.load_default()
+
+            # Measure text to centre it horizontally
+            bbox = draw.textbbox((0, 0), text, font=font_loaded)
+            tw = bbox[2] - bbox[0]
+            tx = (w - tw) // 2
+
+            # Drop-shadow (black, 1 px offset)
+            draw.text((tx + 1, y + 1), text, font=font_loaded, fill=(0, 0, 0))
+            # Main text
+            draw.text((tx, y), text, font=font_loaded, fill=color_rgb)
+
+            # Write back to frame in-place
+            frame[:] = _cv2.cvtColor(np.array(pil_img), _cv2.COLOR_RGB2BGR)
+
+        except Exception:
+            # PIL not available — fall back to cv2 ASCII rendering (° → d)
+            font = _cv2.FONT_HERSHEY_SIMPLEX
+            fallback = text.replace('\u00b0', 'd') \
+                           .replace('\u2032', "'") \
+                           .replace('\u2033', '"')
+            h, w = frame.shape[:2]
+            c_scale = max(0.38, font_size_px / 40.0)
+            c_thick = max(1, int(c_scale * 1.5))
+            (cw, _), _ = _cv2.getTextSize(fallback, font, c_scale, c_thick)
+            tx = (w - cw) // 2
+            _cv2.putText(frame, fallback, (tx + 1, y + 1), font,
+                         c_scale, (0, 0, 0), c_thick + 1, _cv2.LINE_AA)
+            _cv2.putText(frame, fallback, (tx, y), font,
+                         c_scale, color_bgr, c_thick, _cv2.LINE_AA)
 
     def _render_frame(self, base_settings: QgsMapSettings,
                       cx: float, cy: float, bearing: float):
